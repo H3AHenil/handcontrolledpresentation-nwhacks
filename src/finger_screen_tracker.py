@@ -8,10 +8,10 @@ Maps finger position to screen coordinates using perspective-correct homography.
 import sys
 from pathlib import Path
 
-from server.receiver import frames_from_udp, create_udp_socket, PORT
-
-# Add parent directory to path for apriltage import
+# Add parent directory to path for local imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from server.receiver import frames_from_udp, create_udp_socket, PORT
 
 import cv2
 import mediapipe as mp
