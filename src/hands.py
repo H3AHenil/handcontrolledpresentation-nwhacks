@@ -16,12 +16,11 @@ INVERT_HANDEDNESS = True
 MAX_NUM_HANDS = 2
 
 # ==========================================================
-# DISCRETE EVENT LATCHING (reduces flicker / spam)
-# Pointer + Stretch + Thumb rotation update quickly.
-# Everything else fires once, then holds briefly.
+# DISCRETE EVENT LATCHING
 # ==========================================================
 PINCH_LATCH_S = 0.30
 CLAP_LATCH_S = 0.65
+TWO_FINGER_SWIPE_LATCH_S = 0.45
 
 CLAP_COOLDOWN_S = 0.70
 
@@ -44,26 +43,55 @@ POINTER_REQUIRE_ONLY_INDEX = True
 
 # ==========================================================
 # THUMBS-UP ROTATION (ONLY when strict thumbs-up)
+# (deliberate thresholds)
 # ==========================================================
-THUMB_MIN_IP_ANGLE_DEG = 150.0
-THUMB_TIP_RATIO_3 = 0.95
+THUMB_MIN_IP_ANGLE_DEG = 162.0
+THUMB_TIP_RATIO_3 = 1.10
 
-THUMBS_UP_MIN_VY = -0.70
-THUMBS_UP_MAX_VX = 0.55
-THUMBS_UP_MAX_VZ = 0.70
+THUMBS_UP_MIN_VY = -0.88
+THUMBS_UP_MAX_VX = 0.28
+THUMBS_UP_MAX_VZ = 0.35
 
-THUMBS_ENTER_FRAMES = 3
+THUMBS_ENTER_FRAMES = 8
 THUMBS_EXIT_FRAMES = 2
 THUMBS_LOG_INTERVAL_S = 0.25
+
+THUMBS_REQUIRE_CURLED_FINGERS = 3  # out of 4
+THUMBS_BLOCK_IF_POINTER = True
 
 # ==========================================================
 # CLAP (discrete) with arming + last-seen fallback
 # ==========================================================
 CLAP_ARM_RATIO = 1.90
 CLAP_NEAR_RATIO = 0.78
-CLAP_TRIGGER_RATIO = 1.15
-CLAP_APPROACH_SPEED = 2.0
 LAST_SEEN_WINDOW_S = 0.30
+
+# Clap intent (suppresses swipe when hands are closing/near)
+CLAP_INTENT_RATIO = 1.35
+CLAP_INTENT_APPROACH = 1.4
+
+# ==========================================================
+# TWO-FINGER SWIPE (discrete) - ONLY while index+middle are out
+# MORE GENEROUS + more robust (uses peak range + direction consistency)
+# ==========================================================
+TFS_WINDOW_S = 0.30                 # was 0.22
+TFS_MIN_PEAK_SPEED_PX_S = 900       # was 1500
+TFS_MIN_PEAK_DIST_PX = 90           # was 140
+TFS_COOLDOWN_S = 0.55               # slightly shorter to feel responsive
+
+# Require that movement is mostly one direction in the window
+TFS_DIR_CONSISTENCY_MIN = 0.55      # |net_dx| / peak_dx
+
+# Wrist flick: eased thresholds, BUT still required unless movement is very strong
+TFS_MIN_ANGLE_DELTA_DEG = 10.0      # was 18
+TFS_MIN_ANGLE_SPEED_DEG_S = 80.0    # was 140
+
+# If motion is extremely strong, allow swipe even if flick is imperfect
+TFS_STRONG_DIST_PX = 180
+TFS_STRONG_SPEED_PX_S = 1600
+
+# If swipe direction feels reversed, toggle:
+INVERT_TWO_FINGER_SWIPE_DIRECTION = False
 
 # ==========================================================
 # STRETCH (continuous): distance between two index tips (when both are Pointer)
@@ -161,6 +189,21 @@ def latch(st, label, now, hold_s):
     st["latched_until"] = max(st["latched_until"], now + hold_s)
 
 
+def swipe_dir_from_dx(dx):
+    direction = "Right" if dx > 0 else "Left"
+    if INVERT_TWO_FINGER_SWIPE_DIRECTION:
+        direction = "Left" if direction == "Right" else "Right"
+    return direction
+
+
+def wrap_deg(a):
+    return (a + 180.0) % 360.0 - 180.0
+
+
+def angle_delta_deg(a0, a1):
+    return wrap_deg(a1 - a0)
+
+
 # ----------------- feature extraction -----------------
 def extract(px, n3):
     WRIST = 0
@@ -206,18 +249,31 @@ def extract(px, n3):
     pinky_curled = is_curled(pky_ang, pky_tip_r)
 
     # Thumb vector unit
-    tv = (n3[TH_TIP][0] - n3[TH_MCP][0], n3[TH_TIP][1] - n3[TH_MCP][1], n3[TH_TIP][2] - n3[TH_MCP][2])
+    tv = (
+        n3[TH_TIP][0] - n3[TH_MCP][0],
+        n3[TH_TIP][1] - n3[TH_MCP][1],
+        n3[TH_TIP][2] - n3[TH_MCP][2],
+    )
     tv_len = math.sqrt(tv[0] ** 2 + tv[1] ** 2 + tv[2] ** 2) + 1e-9
     tvu = (tv[0] / tv_len, tv[1] / tv_len, tv[2] / tv_len)
 
     thumb_strong = (th_ang >= THUMB_MIN_IP_ANGLE_DEG) and (th_tip_r >= THUMB_TIP_RATIO_3)
+
+    # Wrist-flick proxy angle (image plane): wrist -> middle_mcp
+    wx, wy = px[WRIST]
+    mx, my = px[MD_MCP]
+    flick_angle_deg = math.degrees(math.atan2((my - wy), (mx - wx)))
 
     return {
         "hand_scale_3": hand_scale_3,
         "palm_center_3": palm_center_3,
         "palm_center_px": palm_center_px,
 
+        "flick_angle_deg": flick_angle_deg,
+
         "index_tip_px": px[IX_TIP],
+        "middle_tip_px": px[MD_TIP],
+
         "index_tip_3": n3[IX_TIP],
         "thumb_tip_3": n3[TH_TIP],
 
@@ -253,12 +309,19 @@ def main():
         "thumbs_enter": 0,
         "thumbs_exit": 0,
         "last_thumb_log": 0.0,
+
+        # Two-finger swipe tracking: (t, x, palm_x, angle_deg)
+        "tfs_track": deque(),
+        "tfs_cooldown_until": 0.0,
     } for k in ["Left", "Right", "Unknown"]}
 
     # Clap globals
     clap_latched_until = 0.0
     clap_cooldown_until = 0.0
     clap_armed = True
+
+    # Pair history to estimate approach speed (for clap intent)
+    pair_hist = deque(maxlen=6)
 
     # Last-seen for overlap dropout
     last_seen = {
@@ -303,6 +366,7 @@ def main():
                     if results.multi_handedness and i < len(results.multi_handedness):
                         lbl = handedness_label(results.multi_handedness[i])
 
+                    # prevent collisions if both come as same label
                     if lbl in used_labels:
                         if "Left" not in used_labels:
                             lbl = "Left"
@@ -326,17 +390,24 @@ def main():
                         last_seen[lbl]["palm3"] = feats["palm_center_3"]
                         last_seen[lbl]["scale3"] = feats["hand_scale_3"]
 
-                    # Pointer (continuous)
+                    # ---- Pointer pose (index only) ----
                     if POINTER_REQUIRE_ONLY_INDEX:
                         pointer = feats["index_ext"] and (not feats["middle_ext"]) and (not feats["ring_ext"]) and (not feats["pinky_ext"])
                     else:
                         pointer = feats["index_ext"]
 
-                    # Thumbs-up rotation activation
+                    # ---- Two-finger mode pose ----
+                    # Index + middle extended, ring + pinky curled -> deliberate "two-finger" gesture.
+                    two_finger_pose = feats["index_ext"] and feats["middle_ext"] and feats["ring_curled"] and feats["pinky_curled"]
+
+                    # ---- Thumb rotation mode candidate (VERY strict) ----
                     vx, vy, vz = feats["thumb_vec_u"]
                     thumbs_up_dir = (vy <= THUMBS_UP_MIN_VY) and (abs(vx) <= THUMBS_UP_MAX_VX) and (abs(vz) <= THUMBS_UP_MAX_VZ)
                     curled_count = sum([feats["index_curled"], feats["middle_curled"], feats["ring_curled"], feats["pinky_curled"]])
-                    thumbs_candidate = feats["thumb_strong"] and thumbs_up_dir and (curled_count >= 2)
+
+                    thumbs_candidate = feats["thumb_strong"] and thumbs_up_dir and (curled_count >= THUMBS_REQUIRE_CURLED_FINGERS)
+                    if THUMBS_BLOCK_IF_POINTER and pointer:
+                        thumbs_candidate = False
 
                     if thumbs_candidate:
                         st["thumbs_enter"] = min(THUMBS_ENTER_FRAMES, st["thumbs_enter"] + 1)
@@ -347,8 +418,10 @@ def main():
 
                     if (not st["thumbs_active"]) and st["thumbs_enter"] >= THUMBS_ENTER_FRAMES:
                         st["thumbs_active"] = True
+                        print(f"[{time.strftime('%H:%M:%S')}] {lbl}: ENTER ThumbRot")
                     elif st["thumbs_active"] and st["thumbs_exit"] >= THUMBS_EXIT_FRAMES:
                         st["thumbs_active"] = False
+                        print(f"[{time.strftime('%H:%M:%S')}] {lbl}: EXIT ThumbRot")
 
                     yaw_deg = pitch_deg = None
                     if st["thumbs_active"]:
@@ -357,20 +430,21 @@ def main():
                             st["last_thumb_log"] = now
                             print(f"[{time.strftime('%H:%M:%S')}] {lbl}: ThumbRot yaw={yaw_deg:+.1f} pitch={pitch_deg:+.1f}")
 
-                    # Pinch (disabled while thumb-rotation is active)
+                    # ---- Pinch ----
+                    # Make pinch IMPOSSIBLE while in two-finger mode.
                     thumb_index = dist3(feats["thumb_tip_3"], feats["index_tip_3"]) / feats["hand_scale_3"]
-                    if st["thumbs_active"]:
+                    if st["thumbs_active"] or two_finger_pose:
                         st["pinch_active"] = False
+                        st["pinch_prev"] = False  # prevent a "late" rising-edge when leaving two-finger pose
                     else:
                         st["pinch_active"] = update_hysteresis(st["pinch_active"], thumb_index, PINCH_ON, PINCH_OFF)
 
-                    # Pinch latch on rising edge
-                    if (not st["pinch_prev"]) and st["pinch_active"]:
-                        latch(st, "Pinch", now, PINCH_LATCH_S)
-                        print(f"[{time.strftime('%H:%M:%S')}] {lbl}: Pinch")
-                    st["pinch_prev"] = st["pinch_active"]
+                        if (not st["pinch_prev"]) and st["pinch_active"]:
+                            latch(st, "Pinch", now, PINCH_LATCH_S)
+                            print(f"[{time.strftime('%H:%M:%S')}] {lbl}: Pinch")
+                        st["pinch_prev"] = st["pinch_active"]
 
-                    # Pointer should not show while pinching
+                    # pointer should not show while pinching
                     if st["pinch_active"]:
                         pointer = False
 
@@ -381,6 +455,7 @@ def main():
                         mp_drawing_styles.get_default_hand_connections_style()
                     )
 
+                    # cursor marker
                     if pointer or st["pinch_active"]:
                         cv2.circle(frame, feats["index_tip_px"], 10, (0, 255, 0), -1)
 
@@ -388,18 +463,17 @@ def main():
                         "label": lbl,
                         "feats": feats,
                         "pointer": pointer,
+                        "two_finger": two_finger_pose,
                         "pinch": st["pinch_active"],
                         "thumbrot": st["thumbs_active"],
                         "yaw": yaw_deg,
                         "pitch": pitch_deg
                     })
 
-            # ---------------- clap detection ----------------
+            # ---------------- clap detection + intent ----------------
             clap_active = now < clap_latched_until
-            pair_ratio = None
 
             def compute_pair_ratio():
-                # Current two hands preferred
                 if len(detected) == 2:
                     p0 = detected[0]["feats"]["palm_center_3"]
                     p1 = detected[1]["feats"]["palm_center_3"]
@@ -407,7 +481,6 @@ def main():
                     s1 = detected[1]["feats"]["hand_scale_3"]
                     avg = (s0 + s1) / 2.0
                     return dist3(p0, p1) / (avg + 1e-9)
-                # Fallback to last-seen (overlap dropout)
                 if last_valid("Left", now) and last_valid("Right", now):
                     p0 = last_seen["Left"]["palm3"]
                     p1 = last_seen["Right"]["palm3"]
@@ -417,11 +490,20 @@ def main():
 
             pair_ratio = compute_pair_ratio()
 
-            # arm when far apart
+            approach = 0.0
+            if pair_ratio is not None:
+                pair_hist.append((now, pair_ratio))
+                if len(pair_hist) >= 2:
+                    t0, r0 = pair_hist[0]
+                    t1, r1 = pair_hist[-1]
+                    dt = max(t1 - t0, 1e-6)
+                    approach = (r0 - r1) / dt  # positive => closing
+
+            clap_intent = (pair_ratio is not None) and ((pair_ratio <= CLAP_INTENT_RATIO) or (approach >= CLAP_INTENT_APPROACH))
+
             if pair_ratio is not None and pair_ratio >= CLAP_ARM_RATIO:
                 clap_armed = True
 
-            # trigger once when armed + near
             if (not clap_active) and clap_armed and (now >= clap_cooldown_until) and (pair_ratio is not None):
                 if pair_ratio <= CLAP_NEAR_RATIO:
                     clap_latched_until = now + CLAP_LATCH_S
@@ -432,6 +514,65 @@ def main():
 
             if clap_active:
                 overlay.append("GLOBAL: Clap")
+
+            # ---------------- TWO-FINGER SWIPE detection ----------------
+            for d in detected:
+                lbl = d["label"]
+                feats = d["feats"]
+                st = state[lbl]
+
+                two_finger = d["two_finger"]
+                suppressed = clap_active or clap_intent or d["thumbrot"] or d["pinch"]
+
+                if (not two_finger) or suppressed:
+                    st["tfs_track"].clear()
+                    continue
+
+                if now < st["tfs_cooldown_until"]:
+                    st["tfs_track"].clear()
+                    continue
+
+                # Swipe point = average of index+middle tips (stable)
+                x_tips = 0.5 * (feats["index_tip_px"][0] + feats["middle_tip_px"][0])
+                palm_x = feats["palm_center_px"][0]
+                # Combine tips + palm so motion is still measurable if fingertip jitters
+                x = 0.65 * x_tips + 0.35 * palm_x
+
+                ang = feats["flick_angle_deg"]
+                st["tfs_track"].append((now, x, ang))
+
+                # keep only recent samples
+                while st["tfs_track"] and (now - st["tfs_track"][0][0]) > TFS_WINDOW_S:
+                    st["tfs_track"].popleft()
+
+                if len(st["tfs_track"]) >= 3:
+                    t0, x0, a0 = st["tfs_track"][0]
+                    t1, x1, a1 = st["tfs_track"][-1]
+                    dt = max(t1 - t0, 1e-6)
+
+                    xs = [p[1] for p in st["tfs_track"]]
+                    peak_dx = (max(xs) - min(xs))
+                    net_dx = x1 - x0
+                    consistency = abs(net_dx) / (peak_dx + 1e-6)
+                    peak_speed = peak_dx / dt
+
+                    da = angle_delta_deg(a0, a1)
+                    ang_speed = abs(da) / dt
+
+                    flick_ok = (abs(da) >= TFS_MIN_ANGLE_DELTA_DEG) and (ang_speed >= TFS_MIN_ANGLE_SPEED_DEG_S)
+                    strong_motion_ok = (peak_dx >= TFS_STRONG_DIST_PX) and (peak_speed >= TFS_STRONG_SPEED_PX_S)
+
+                    if (peak_dx >= TFS_MIN_PEAK_DIST_PX and
+                        peak_speed >= TFS_MIN_PEAK_SPEED_PX_S and
+                        consistency >= TFS_DIR_CONSISTENCY_MIN and
+                        (flick_ok or strong_motion_ok)):
+
+                        direction = swipe_dir_from_dx(net_dx)
+                        print(f"[{time.strftime('%H:%M:%S')}] {lbl}: TwoFingerSwipe {direction}  (peak_dx={peak_dx:.0f}, peak_v={peak_speed:.0f}, da={da:.0f})")
+                        latch(st, f"TwoFingerSwipe {direction}", now, TWO_FINGER_SWIPE_LATCH_S)
+
+                        st["tfs_cooldown_until"] = now + TFS_COOLDOWN_S
+                        st["tfs_track"].clear()
 
             # ---------------- stretch (continuous) ----------------
             if len(detected) == 2 and STRETCH_REQUIRE_POINTERS and detected[0]["pointer"] and detected[1]["pointer"]:
@@ -453,6 +594,8 @@ def main():
                         disp = "ThumbRot"
                     elif now < st["latched_until"]:
                         disp = st["latched_label"]
+                    elif d["two_finger"]:
+                        disp = "TwoFinger (ready)"
                     elif d["pointer"]:
                         disp = "Pointer"
                     else:
@@ -482,7 +625,7 @@ def main():
                 cv2.putText(display_frame, s, (x0, y0 + i * line_h),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
 
-            cv2.imshow("Gestures: Pointer / Pinch / Stretch / ThumbRot / Clap", display_frame)
+            cv2.imshow("Gestures: Pointer / Pinch / TwoFingerSwipe / Stretch / ThumbRot / Clap", display_frame)
 
             key = cv2.waitKey(1) & 0xFF
             if key == 27 or key == ord('q'):
