@@ -286,6 +286,8 @@ def run_integrated_tracker(
         while True:
 
             frame, latency = receiver.get_latest()
+            if frame is None:
+                continue
 
             frame = cv2.flip(frame,-1)
 

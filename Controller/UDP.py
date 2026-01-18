@@ -51,9 +51,35 @@ class UDPGestureController:
 
     def _send_json(self, data: dict, port: Optional[int] = None):
         """Send JSON data over UDP."""
-        json_data = json.dumps(data)
+        # Convert numpy types to native Python types for JSON serialization
+        sanitized = self._sanitize_for_json(data)
+        json_data = json.dumps(sanitized)
         target_port = port or self.gesture_port
         self.sock.sendto(json_data.encode('utf-8'), (self.target_ip, target_port))
+
+    def _sanitize_for_json(self, obj):
+        """
+        Recursively convert numpy types to native Python types for JSON serialization.
+
+        Args:
+            obj: Object to sanitize (dict, list, or scalar value)
+
+        Returns:
+            JSON-serializable object with numpy types converted to Python types
+        """
+        if isinstance(obj, dict):
+            return {k: self._sanitize_for_json(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._sanitize_for_json(item) for item in obj]
+        elif hasattr(obj, 'item'):
+            # numpy scalar types have .item() method to convert to Python scalar
+            return obj.item()
+        elif isinstance(obj, float):
+            return float(obj)
+        elif isinstance(obj, int):
+            return int(obj)
+        else:
+            return obj
 
     def _send_text(self, command: str, port: Optional[int] = None):
         """Send text command over UDP (legacy protocol)."""
