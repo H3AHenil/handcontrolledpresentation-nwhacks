@@ -192,9 +192,8 @@ class GestureBackendService:
         """Process a single hand's gestures."""
         label = d.label
         
-        # Handle pointer/pinch mode - send cursor position to keep laser visible
-        # Send pointer for both pointer mode AND pinch mode (so laser stays visible during pinch)
-        if (d.pointer or d.pinch) and screen_result:
+        # Handle pointer mode - send cursor position and update last known position
+        if d.pointer and screen_result:
             self._send_pointer(screen_result, label)
         
         # Get position to use (current screen_result or last known position)

@@ -168,27 +168,29 @@ public class AprilTagOverlay : Window
         double screenWidth = Width;
         double screenHeight = Height;
         
-        // Draw AprilTag in each corner
-        // Top-Left (ID: 0)
-        DrawAprilTag(CornerMargin, CornerMargin, 0);
+        // Calculate base tag ID for this screen (4 tags per screen)
+        int baseId = TargetScreenIndex * 4;
         
-        // Top-Right (ID: 1)
-        DrawAprilTag(screenWidth - TagSize - CornerMargin, CornerMargin, 1);
+        // Draw AprilTag in each corner (matching Python generate_tags.py)
+        // Top-Left (ID: baseId + 0)
+        DrawAprilTag(CornerMargin, CornerMargin, baseId + 0);
         
-        // Bottom-Left (ID: 2)
-        DrawAprilTag(CornerMargin, screenHeight - TagSize - CornerMargin, 2);
+        // Top-Right (ID: baseId + 1)
+        DrawAprilTag(screenWidth - TagSize - CornerMargin, CornerMargin, baseId + 1);
         
-        // Bottom-Right (ID: 3)
-        DrawAprilTag(screenWidth - TagSize - CornerMargin, screenHeight - TagSize - CornerMargin, 3);
+        // Bottom-Right (ID: baseId + 2)
+        DrawAprilTag(screenWidth - TagSize - CornerMargin, screenHeight - TagSize - CornerMargin, baseId + 2);
+        
+        // Bottom-Left (ID: baseId + 3)
+        DrawAprilTag(CornerMargin, screenHeight - TagSize - CornerMargin, baseId + 3);
     }
     
     private void DrawAprilTag(double x, double y, int tagId)
     {
-        // Create a simple AprilTag-like pattern
-        // This is a simplified 4x4 pattern for visual identification
-        // Real AprilTags would use a proper encoding library
+        // Get the actual tag16h5 AprilTag pattern
+        // These patterns match the Python generate_tags.py output
         
-        var tagGrid = GetSimplifiedTagPattern(tagId);
+        var tagGrid = GetTag16h5Pattern(tagId);
         
         // Background border (white)
         var background = new Border
@@ -256,50 +258,54 @@ public class AprilTagOverlay : Window
     }
     
     /// <summary>
-    /// Gets a simplified 4x4 pattern for the given tag ID.
-    /// These are unique patterns for each corner.
+    /// Gets the actual tag16h5 AprilTag pattern for the given tag ID.
+    /// These patterns match the OpenCV/pupil-apriltags tag16h5 family.
+    /// The 16-bit codes are from the AprilTag library.
     /// </summary>
-    private bool[,] GetSimplifiedTagPattern(int tagId)
+    private bool[,] GetTag16h5Pattern(int tagId)
     {
-        // Simple unique patterns for each corner
-        return tagId switch
-        {
-            0 => new bool[,] // Top-Left
-            {
-                { true, true, false, false },
-                { true, false, false, false },
-                { false, false, false, true },
-                { false, false, true, true }
-            },
-            1 => new bool[,] // Top-Right
-            {
-                { false, false, true, true },
-                { false, false, false, true },
-                { true, false, false, false },
-                { true, true, false, false }
-            },
-            2 => new bool[,] // Bottom-Left
-            {
-                { false, false, true, true },
-                { false, true, true, false },
-                { false, true, true, false },
-                { true, true, false, false }
-            },
-            3 => new bool[,] // Bottom-Right
-            {
-                { true, true, true, true },
-                { true, false, false, true },
-                { true, false, false, true },
-                { true, true, true, true }
-            },
-            _ => new bool[,]
-            {
-                { true, false, true, false },
-                { false, true, false, true },
-                { true, false, true, false },
-                { false, true, false, true }
-            }
+        // tag16h5 codes (from AprilTag library)
+        // Each code is 16 bits representing the 4x4 inner data pattern
+        int[] tag16h5Codes = {
+            0x231b, // ID 0
+            0x2ea5, // ID 1
+            0x346a, // ID 2
+            0x45b9, // ID 3
+            0x79a6, // ID 4
+            0x7f6b, // ID 5
+            0x9159, // ID 6
+            0xacf4, // ID 7
+            0xb461, // ID 8
+            0xb896, // ID 9
+            0xb8b4, // ID 10
+            0xb952, // ID 11
+            0xbb17, // ID 12
+            0xbc19, // ID 13
+            0xc317, // ID 14
+            0xc87c, // ID 15
         };
+        
+        if (tagId < 0 || tagId >= tag16h5Codes.Length)
+        {
+            tagId = 0; // Fallback to ID 0
+        }
+        
+        int code = tag16h5Codes[tagId];
+        bool[,] pattern = new bool[4, 4];
+        
+        // Decode the 16-bit code into 4x4 pattern
+        // Bits are arranged MSB first, row by row
+        for (int row = 0; row < 4; row++)
+        {
+            int rowBits = (code >> (12 - row * 4)) & 0xF;
+            for (int col = 0; col < 4; col++)
+            {
+                // Bit 3 is leftmost, bit 0 is rightmost
+                pattern[row, col] = ((rowBits >> (3 - col)) & 1) == 1;
+            }
+        }
+        
+        return pattern;
     }
     
     /// <summary>
