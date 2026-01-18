@@ -213,7 +213,9 @@ public class GestureController : IGestureInputHandler, IDisposable
             // Update laser pointer overlay
             _dispatcher.BeginInvoke(() =>
             {
-                EnsureLaserOverlay();
+                // Ensure overlay exists and is targeting the correct screen
+                EnsureLaserOverlayForScreen(screenIndex);
+                
                 if (_laserOverlay != null)
                 {
                     if (DpiAwareScreenManager.NormalizedToPhysical(screenIndex, normalizedX, normalizedY,
@@ -421,13 +423,37 @@ public class GestureController : IGestureInputHandler, IDisposable
     
     private void EnsureLaserOverlay()
     {
+        EnsureLaserOverlayForScreen(_targetScreenIndex);
+    }
+    
+    /// <summary>
+    /// Ensures the laser overlay exists and is targeting the specified screen.
+    /// This allows the laser pointer to dynamically move between screens.
+    /// </summary>
+    /// <param name="screenIndex">The screen index to target (-1 for default)</param>
+    private void EnsureLaserOverlayForScreen(int screenIndex)
+    {
+        // Use default target screen if -1 is passed
+        int effectiveScreenIndex = screenIndex >= 0 ? screenIndex : _targetScreenIndex;
+        
         if (_laserOverlay == null)
         {
-            _laserOverlay = new LaserPointerOverlay(_targetScreenIndex);
+            _laserOverlay = new LaserPointerOverlay(effectiveScreenIndex);
+            if (_currentMode == GestureMode.LaserPointer)
+            {
+                _laserOverlay.Show();
+            }
         }
-        else if (_laserOverlay.TargetScreenIndex != _targetScreenIndex)
+        else if (_laserOverlay.TargetScreenIndex != effectiveScreenIndex)
         {
-            _laserOverlay.SetTargetScreen(_targetScreenIndex);
+            // Switch to the new target screen
+            _laserOverlay.SetTargetScreen(effectiveScreenIndex);
+            
+            // Re-show on the new screen if currently in laser mode
+            if (_currentMode == GestureMode.LaserPointer && !_laserOverlay.IsVisible)
+            {
+                _laserOverlay.Show();
+            }
         }
     }
     

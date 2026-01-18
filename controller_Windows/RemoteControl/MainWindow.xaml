@@ -28,6 +28,7 @@
                 
                 <WrapPanel Margin="0,5,0,0">
                     <Button x:Name="AprilTagButton" Content="Show AprilTags" Click="OnToggleAprilTags" Width="120" Height="32" Margin="0,0,10,5"/>
+                    <Button Content="Configure Screens" Click="OnConfigureScreens" Width="130" Height="32" Margin="0,0,10,5"/>
                     <Button x:Name="LaserTestButton" Content="Test Laser Pointer" Click="OnTestLaserPointer" Width="130" Height="32" Margin="0,0,10,5"/>
                 </WrapPanel>
                 
