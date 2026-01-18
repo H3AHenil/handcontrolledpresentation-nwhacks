@@ -1,0 +1,6 @@
+Raspberry Pi Camera Sender Probe
+
+sudo apt-get install pkg-config libopencv-dev // dependencies
+
+g++ sender_probe.cpp -o sender_probe $(pkg-config --cflags --libs opencv4)
+./sender_probe <server_ip>
