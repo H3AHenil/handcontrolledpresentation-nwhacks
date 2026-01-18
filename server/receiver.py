@@ -3,12 +3,13 @@ import socket
 import numpy as np
 import struct
 import time
-from typing import Dict, Generator, Optional, TypedDict, Tuple, Union
+import threading
+from typing import Dict, Optional, Tuple, TypedDict, Union
 from dataclasses import dataclass
 
 
 # ==========================================
-# Part 1: Utility Functions (保留原样)
+# Part 1: 必要工具函数 (Utility Functions)
 # ==========================================
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class FisheyeCalibration:
 
 def undistort_fisheye(frame_bgr: np.ndarray, calib: FisheyeCalibration, *, balance: float = 0.0,
                       new_size: Optional[Tuple[int, int]] = None) -> np.ndarray:
+    """鱼眼畸变矫正 (如果需要使用，请在主循环中定义 K 和 D)"""
     h, w = frame_bgr.shape[:2]
     if new_size is None:
         new_w, new_h = w, h
@@ -34,6 +36,7 @@ def undistort_fisheye(frame_bgr: np.ndarray, calib: FisheyeCalibration, *, balan
 
 def approximate_fov_crop(frame_bgr: np.ndarray, target_hfov_deg: float, *,
                          original_hfov_deg: float = 160.0) -> np.ndarray:
+    """线性广角裁剪 (防止竖条问题)"""
     if target_hfov_deg <= 0 or target_hfov_deg >= original_hfov_deg:
         return frame_bgr
 
@@ -46,182 +49,204 @@ def approximate_fov_crop(frame_bgr: np.ndarray, target_hfov_deg: float, *,
 
 
 # ==========================================
-# Part 2: UDP Core Logic (增加探针处理)
+# Part 2: 多线程接收核心 (Threaded Receiver)
 # ==========================================
 
 PORT = 9999
 
 
-class _FrameBuffer(TypedDict):
+class FrameBuffer(TypedDict):
     chunks: Dict[int, bytes]
     total: int
-    time: float
-    probe_ts: float  # 新增: 记录该帧的发送端时间戳
+    probe_ts: float
+    create_time: float
 
 
-def create_udp_socket(port: int = PORT, rcvbuf_bytes: int = 4 * 1024 * 1024) -> socket.socket:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(('0.0.0.0', port))
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, int(rcvbuf_bytes))
-    return sock
+class LowLatencyReceiver:
+    def __init__(self, port: int = PORT, wide_angle_crop: bool = False):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(('0.0.0.0', port))
+        # 4MB 接收缓冲区，防止系统层丢包
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
 
+        # 共享数据: (图像帧, 延迟ms)
+        self.latest_bundle: Optional[Tuple[np.ndarray, float]] = None
+        self.lock = threading.Lock()
+        self.running = True
 
-def frames_from_udp(
-        sock: socket.socket,
-        *,
-        packet_size: int = 65536,
-        frame_timeout_s: float = 1.0,
-        drop_incomplete_on_yield: bool = True,
-        wide_angle_crop: bool = False,
-        target_hfov_deg: float = 100.0,
-        original_hfov_deg: float = 160.0,
-) -> Generator[Tuple[np.ndarray, float], None, None]:
-    """
-    修改后的 Generator:
-    Yields:
-        Tuple[np.ndarray, float]: (图像帧, 延迟毫秒数)
-        如果未启用探针，延迟返回 -1.0
-    """
-    buffer: Dict[int, _FrameBuffer] = {}
+        # 配置
+        self.wide_angle_crop = wide_angle_crop
 
-    while True:
-        try:
-            data, _addr = sock.recvfrom(packet_size)
-        except OSError:
-            continue
+        # 启动后台接收线程
+        self.thread = threading.Thread(target=self._receive_worker)
+        self.thread.daemon = True
+        self.thread.start()
+        print(f"🚀 低延迟接收线程已启动 (端口 {port})")
 
-        # ---------------------------------------------------------
-        # 协议头解析逻辑 (自动兼容是否开启探针)
-        # ---------------------------------------------------------
-        # 情况 A: 带有探针 (8字节double + 3字节头 = 11字节)
-        if len(data) >= 11:
-            # 尝试解析前11个字节
+    def _receive_worker(self):
+        """
+        后台线程工作逻辑：
+        1. 循环收包
+        2. 解析探针 (Probe)
+        3. 拼包 & 解码
+        4. 执行裁剪 (可选)
+        5. 更新最新帧 (丢弃旧帧)
+        """
+        buffer: Dict[int, FrameBuffer] = {}
+
+        while self.running:
             try:
-                # 'd' = double (8 bytes), 'B' = unsigned char (1 byte)
-                ts, frame_id, packet_id, total_packets = struct.unpack("dBBB", data[:11])
-                payload = data[11:]
-                has_probe = True
-            except struct.error:
-                # 解析失败，回退到情况 B
-                has_probe = False
+                # 阻塞接收 (不会卡主界面)
+                data, _ = self.sock.recvfrom(65536)
 
-        # 情况 B: 无探针 (3字节头)
-        if len(data) >= 3 and (not 'has_probe' in locals() or not has_probe):
-            # 再次检查，防止误判
-            # 如果C++没开探针，这里只有3字节头
-            if len(data) < 11:
-                frame_id, packet_id, total_packets = struct.unpack("BBB", data[:3])
-                payload = data[3:]
+                # --- 协议头智能解析 ---
+                has_probe = False
                 ts = 0.0
-                has_probe = False
-            else:
-                # 这是一种罕见情况，可能包长度很大但不是探针，假设它是无探针模式
-                frame_id, packet_id, total_packets = struct.unpack("BBB", data[:3])
-                payload = data[3:]
-                ts = 0.0
-                has_probe = False
+                frame_id = 0
+                packet_id = 0
+                total_packets = 0
+                payload = b''
 
-        if len(data) < 3: continue
+                # 尝试解析 11字节头 (探针模式: double + 3 bytes)
+                if len(data) >= 11:
+                    try:
+                        ts_val, fid, pid, total = struct.unpack("dBBB", data[:11])
+                        # 简单验证时间戳是否合理 (比如大于2020年的时间戳)
+                        if ts_val > 1600000000:
+                            ts = ts_val
+                            frame_id, packet_id, total_packets = fid, pid, total
+                            payload = data[11:]
+                            has_probe = True
+                    except:
+                        pass
 
-        # ---------------------------------------------------------
+                # 如果不是探针，尝试解析 3字节头 (普通模式)
+                if not has_probe:
+                    if len(data) >= 3:
+                        frame_id, packet_id, total_packets = struct.unpack("BBB", data[:3])
+                        payload = data[3:]
+                    else:
+                        continue
+                # -----------------------
 
-        if frame_id not in buffer:
-            # 初始化 buffer，记录 probe_ts (如果是该帧的第一个包)
-            buffer[frame_id] = _FrameBuffer(
-                chunks={},
-                total=int(total_packets),
-                time=time.time(),
-                probe_ts=ts if has_probe else 0.0
-            )
+                if frame_id not in buffer:
+                    buffer[frame_id] = {
+                        'chunks': {},
+                        'total': int(total_packets),
+                        'probe_ts': 0.0,
+                        'create_time': time.time()
+                    }
 
-        # 如果当前包有时间戳且 buffer 里还没记录（或者更新为更精确的），可以更新
-        if has_probe and buffer[frame_id]['probe_ts'] == 0.0:
-            buffer[frame_id]['probe_ts'] = ts
+                # 记录该帧的时间戳 (取收到的第一个带探针的包)
+                if has_probe and buffer[frame_id]['probe_ts'] == 0.0:
+                    buffer[frame_id]['probe_ts'] = ts
 
-        chunks = buffer[frame_id]['chunks']
-        chunks[int(packet_id)] = payload
+                buffer[frame_id]['chunks'][int(packet_id)] = payload
 
-        if len(chunks) == buffer[frame_id]['total']:
-            sorted_chunks = [chunks[i] for i in range(buffer[frame_id]['total']) if i in chunks]
+                # 检查帧是否完整
+                if len(buffer[frame_id]['chunks']) == buffer[frame_id]['total']:
+                    # 按顺序拼接
+                    sorted_chunks = [buffer[frame_id]['chunks'][i] for i in range(buffer[frame_id]['total']) if
+                                     i in buffer[frame_id]['chunks']]
 
-            if len(sorted_chunks) == buffer[frame_id]['total']:
-                full_data = b''.join(sorted_chunks)
-                np_arr = np.frombuffer(full_data, np.uint8)
-                img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+                    if len(sorted_chunks) == buffer[frame_id]['total']:
+                        full_data = b''.join(sorted_chunks)
+                        np_arr = np.frombuffer(full_data, np.uint8)
 
-                if img is not None:
-                    if wide_angle_crop:
-                        img = approximate_fov_crop(img, target_hfov_deg, original_hfov_deg=original_hfov_deg)
+                        # 解码 (OpenCV C++底层，速度极快)
+                        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
-                    # --- 计算延迟 ---
-                    latency = -1.0
-                    send_ts = buffer[frame_id]['probe_ts']
-                    if send_ts > 0.0:
-                        # 延迟 = 当前接收时间 - 发送时间 (注意：需要设备时间大致同步)
-                        # 如果是同一局域网，NTP误差通常在几毫秒内，或者只看相对波动
-                        latency = (time.time() - send_ts) * 1000.0
+                        if frame is not None:
+                            # 1. 执行必要的功能：裁剪 (如果在主线程做会增加显示延迟，所以在这里做)
+                            if self.wide_angle_crop:
+                                frame = approximate_fov_crop(frame, target_hfov_deg=100.0, original_hfov_deg=160.0)
 
-                    yield img, latency
+                            # 2. 计算延迟
+                            latency = -1.0
+                            send_ts = buffer[frame_id]['probe_ts']
+                            if send_ts > 0.0:
+                                # 延迟 = 当前接收时间 - 发送时间
+                                latency = (time.time() - send_ts) * 1000.0
 
-            if drop_incomplete_on_yield:
-                buffer.clear()
-            else:
-                del buffer[frame_id]
+                            # 3. 线程安全地更新最新帧
+                            with self.lock:
+                                self.latest_bundle = (frame, latency)
 
-        # Clean up old frames
-        now = time.time()
-        to_delete = [fid for fid, meta in buffer.items() if now - meta['time'] > frame_timeout_s]
-        for fid in to_delete:
-            del buffer[fid]
+                    # 激进清理：拼完一帧后清空 Buffer，防止积压
+                    buffer.clear()
+
+                # 垃圾回收：清理超过 0.5s 的陈旧数据
+                now = time.time()
+                to_del = [fid for fid in buffer if now - buffer[fid]['create_time'] > 0.5]
+                for fid in to_del: del buffer[fid]
+
+            except Exception:
+                continue
+
+    def get_latest(self) -> Tuple[Optional[np.ndarray], float]:
+        """主线程调用：获取当前最新的一帧"""
+        with self.lock:
+            if self.latest_bundle:
+                return self.latest_bundle
+            return None, -1.0
+
+    def stop(self):
+        self.running = False
+        self.sock.close()
 
 
 # ==========================================
-# Part 3: Main Program (Rendering Probe Info)
+# Part 3: 主程序 (渲染与显示)
 # ==========================================
 
 if __name__ == "__main__":
-    sock = create_udp_socket(PORT)
-    print(f"✅ Listening on port {PORT}...")
-    print(f"📺 Mode: Full Wide-Angle (1640x1232)")
-    print("Press 'q' to exit.")
+    # 初始化接收器
+    # wide_angle_crop=False 表示保留全广角 (1640x1232 或 820x616)
+    receiver = LowLatencyReceiver(PORT, wide_angle_crop=False)
+
+    print(f"✅ 接收端就绪 (多线程优化 + 探针支持)")
+    print(f"📺 等待 1640x1232 或 820x616 视频流...")
 
     try:
-        # 获取 generator
-        stream_gen = frames_from_udp(
-            sock,
-            wide_angle_crop=False,
-            original_hfov_deg=160.0
-        )
+        while True:
+            # 1. 获取最新帧 (非阻塞，瞬间完成)
+            frame, latency = receiver.get_latest()
 
-        # 循环获取 (img, latency)
-        for frame, latency in stream_gen:
+            if frame is not None:
+                # 2. 渲染探针信息 (HUD)
+                text_color = (0, 255, 0)  # 绿色
+                info_text = "Latency: N/A"
 
-            # --- 渲染探针信息 ---
-            text_color = (0, 255, 0)  # 绿色
-            info_text = "Latency: N/A"
+                if latency >= 0:
+                    info_text = f"Lat: {latency:.1f} ms"
+                    # 根据延迟变色
+                    if latency > 100:
+                        text_color = (0, 0, 255)  # 红
+                    elif latency > 50:
+                        text_color = (0, 255, 255)  # 黄
 
-            if latency >= 0:
-                info_text = f"Latency: {latency:.1f} ms"
-                # 如果延迟过高，变红
-                if latency > 100:
-                    text_color = (0, 0, 255)
-                elif latency > 50:
-                    text_color = (0, 255, 255)  # 黄色
+                # 绘制黑色背景框 + 文字
+                cv2.rectangle(frame, (5, 5), (240, 45), (0, 0, 0), -1)
+                cv2.putText(frame, info_text, (15, 35), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.8, text_color, 2)
 
-            # 在左上角绘制黑色背景框以便阅读
-            cv2.rectangle(frame, (5, 5), (220, 40), (0, 0, 0), -1)
-            cv2.putText(frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7, text_color, 2)
+                # 3. 显示
+                # 为了在电脑屏幕上看不撑满，可以缩放显示 (这不影响原始数据)
+                # 如果是 1640x1232，建议缩小一半看；如果是 820x616，可以直接看
+                display_h, display_w = frame.shape[:2]
+                if display_w > 1000:
+                    display_frame = cv2.resize(frame, (display_w // 2, display_h // 2))
+                else:
+                    display_frame = frame
 
-            # --- 显示 ---
-            # Resize for display convenience (optional, to fit screen)
-            display_frame = cv2.resize(frame, (820, 616))
-            cv2.imshow('Wide Angle Stream', display_frame)
+                cv2.imshow('Ultra Low Latency Stream', display_frame)
 
+            # 4. 响应按键 (因为有后台接收线程，这里的 waitKey 不会造成网络拥堵)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
+
     except KeyboardInterrupt:
         pass
     finally:
-        sock.close()
+        receiver.stop()
         cv2.destroyAllWindows()
