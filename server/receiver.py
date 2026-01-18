@@ -3,12 +3,12 @@ import socket
 import numpy as np
 import struct
 import time
-from typing import Dict, Generator, Optional, TypedDict, Tuple
+from typing import Dict, Generator, Optional, TypedDict, Tuple, Union
 from dataclasses import dataclass
 
 
 # ==========================================
-# Part 1: Utility Functions (Keep as is)
+# Part 1: Utility Functions (保留原样)
 # ==========================================
 
 @dataclass(frozen=True)
@@ -46,9 +46,8 @@ def approximate_fov_crop(frame_bgr: np.ndarray, target_hfov_deg: float, *,
 
 
 # ==========================================
-# Part 2: UDP Core Logic (Add Probe Handling)
+# Part 2: UDP Core Logic (增加探针处理)
 # ==========================================
-
 
 PORT = 9999
 
@@ -57,7 +56,7 @@ class _FrameBuffer(TypedDict):
     chunks: Dict[int, bytes]
     total: int
     time: float
-    probe_ts: float  # New: Record the sender's timestamp for this frame
+    probe_ts: float  # 新增: 记录该帧的发送端时间戳
 
 
 def create_udp_socket(port: int = PORT, rcvbuf_bytes: int = 4 * 1024 * 1024) -> socket.socket:
@@ -78,10 +77,10 @@ def frames_from_udp(
         original_hfov_deg: float = 160.0,
 ) -> Generator[Tuple[np.ndarray, float], None, None]:
     """
-    Modified Generator:
+    修改后的 Generator:
     Yields:
-        Tuple[np.ndarray, float]: (Image Frame, Latency in milliseconds)
-        If probe is not enabled, latency returns -1.0
+        Tuple[np.ndarray, float]: (图像帧, 延迟毫秒数)
+        如果未启用探针，延迟返回 -1.0
     """
     buffer: Dict[int, _FrameBuffer] = {}
 
@@ -91,34 +90,32 @@ def frames_from_udp(
         except OSError:
             continue
 
-        # Initialize variables to avoid unbound local variable errors
-        ts, frame_id, packet_id, total_packets, payload, has_probe = 0.0, 0, 0, 0, b'', False
-
         # ---------------------------------------------------------
-        # Protocol Header Parsing Logic (Automatically compatible with probe enabled or not)
+        # 协议头解析逻辑 (自动兼容是否开启探针)
         # ---------------------------------------------------------
-        # Case A: With Probe (8-byte double + 3-byte header = 11 bytes)
+        # 情况 A: 带有探针 (8字节double + 3字节头 = 11字节)
         if len(data) >= 11:
-            # Try parsing the first 11 bytes
+            # 尝试解析前11个字节
             try:
                 # 'd' = double (8 bytes), 'B' = unsigned char (1 byte)
-                ts, frame_id, packet_id, total_packets, payload, has_probe = struct.unpack("dBBB", data[:11])
+                ts, frame_id, packet_id, total_packets = struct.unpack("dBBB", data[:11])
+                payload = data[11:]
                 has_probe = True
             except struct.error:
-                # Parsing failed, fallback to Case B
+                # 解析失败，回退到情况 B
                 has_probe = False
 
-        # Case B: Without Probe (3-byte header)
+        # 情况 B: 无探针 (3字节头)
         if len(data) >= 3 and (not 'has_probe' in locals() or not has_probe):
-            # Double-check to prevent misjudgment
-            # If C++ does not enable probe, there are only 3-byte headers
+            # 再次检查，防止误判
+            # 如果C++没开探针，这里只有3字节头
             if len(data) < 11:
                 frame_id, packet_id, total_packets = struct.unpack("BBB", data[:3])
                 payload = data[3:]
                 ts = 0.0
                 has_probe = False
             else:
-                # This is a rare case, the packet length may be large but not a probe, assume it is in no-probe mode
+                # 这是一种罕见情况，可能包长度很大但不是探针，假设它是无探针模式
                 frame_id, packet_id, total_packets = struct.unpack("BBB", data[:3])
                 payload = data[3:]
                 ts = 0.0
@@ -129,7 +126,7 @@ def frames_from_udp(
         # ---------------------------------------------------------
 
         if frame_id not in buffer:
-            # Initialize buffer, record probe_ts (if it is the first packet of the frame)
+            # 初始化 buffer，记录 probe_ts (如果是该帧的第一个包)
             buffer[frame_id] = _FrameBuffer(
                 chunks={},
                 total=int(total_packets),
@@ -137,7 +134,7 @@ def frames_from_udp(
                 probe_ts=ts if has_probe else 0.0
             )
 
-        # If the current packet has a timestamp and the buffer has not recorded it (or update to a more accurate one), it can be updated
+        # 如果当前包有时间戳且 buffer 里还没记录（或者更新为更精确的），可以更新
         if has_probe and buffer[frame_id]['probe_ts'] == 0.0:
             buffer[frame_id]['probe_ts'] = ts
 
@@ -156,12 +153,12 @@ def frames_from_udp(
                     if wide_angle_crop:
                         img = approximate_fov_crop(img, target_hfov_deg, original_hfov_deg=original_hfov_deg)
 
-                    # --- Calculate Latency ---
+                    # --- 计算延迟 ---
                     latency = -1.0
                     send_ts = buffer[frame_id]['probe_ts']
                     if send_ts > 0.0:
-                        # Latency = Current receive time - Send time (Note: Device time needs to be roughly synchronized)
-                        # If it is the same LAN, NTP error is usually within a few milliseconds, or just look at relative fluctuations
+                        # 延迟 = 当前接收时间 - 发送时间 (注意：需要设备时间大致同步)
+                        # 如果是同一局域网，NTP误差通常在几毫秒内，或者只看相对波动
                         latency = (time.time() - send_ts) * 1000.0
 
                     yield img, latency
@@ -189,34 +186,34 @@ if __name__ == "__main__":
     print("Press 'q' to exit.")
 
     try:
-        # Get generator
+        # 获取 generator
         stream_gen = frames_from_udp(
             sock,
             wide_angle_crop=False,
             original_hfov_deg=160.0
         )
 
-        # Loop to get (img, latency)
+        # 循环获取 (img, latency)
         for frame, latency in stream_gen:
 
-            # --- Render Probe Info ---
-            text_color = (0, 255, 0)  # Green
+            # --- 渲染探针信息 ---
+            text_color = (0, 255, 0)  # 绿色
             info_text = "Latency: N/A"
 
             if latency >= 0:
                 info_text = f"Latency: {latency:.1f} ms"
-                # If latency is too high, turn red
+                # 如果延迟过高，变红
                 if latency > 100:
                     text_color = (0, 0, 255)
                 elif latency > 50:
-                    text_color = (0, 255, 255)  # Yellow
+                    text_color = (0, 255, 255)  # 黄色
 
-            # Draw a black background box in the upper left corner for readability
+            # 在左上角绘制黑色背景框以便阅读
             cv2.rectangle(frame, (5, 5), (220, 40), (0, 0, 0), -1)
             cv2.putText(frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
                         0.7, text_color, 2)
 
-            # --- Display ---
+            # --- 显示 ---
             # Resize for display convenience (optional, to fit screen)
             display_frame = cv2.resize(frame, (820, 616))
             cv2.imshow('Wide Angle Stream', display_frame)
