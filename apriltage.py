@@ -14,9 +14,14 @@ Inverse Perspective Mapping:
 import cv2
 import numpy as np
 
-# Screen configuration
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
 SCREEN_WIDTH = 1920
 SCREEN_HEIGHT = 1080
+CAMERA_WIDTH = 1280
+CAMERA_HEIGHT = 720
 
 # Tag IDs for each corner: [top-left, top-right, bottom-right, bottom-left]
 CORNER_TAG_IDS = [0, 1, 2, 3]
@@ -33,6 +38,10 @@ INNER_CORNER = {
 }
 
 
+# =============================================================================
+# SCREEN MAPPER CLASS
+# =============================================================================
+
 class ScreenMapper:
     """Maps camera coordinates to screen coordinates using AprilTag homography."""
 
@@ -42,31 +51,21 @@ class ScreenMapper:
 
         # Destination points (screen corners)
         self.screen_corners = np.array([
-            [0, 0],                              # Top-left
-            [screen_width - 1, 0],               # Top-right
-            [screen_width - 1, screen_height - 1],  # Bottom-right
-            [0, screen_height - 1],              # Bottom-left
+            [0, 0],
+            [screen_width - 1, 0],
+            [screen_width - 1, screen_height - 1],
+            [0, screen_height - 1],
         ], dtype=np.float32)
 
         self.homography = None
         self.inverse_homography = None
-        self.camera_corners = None  # Detected tag corners in camera frame
+        self.camera_corners = None
 
     def update(self, tag_corners: dict[int, np.ndarray]) -> bool:
-        """
-        Update homography from detected tag corners.
-
-        Args:
-            tag_corners: Dict mapping tag_id -> 4 corner points
-
-        Returns:
-            True if homography was computed (all 4 tags detected)
-        """
-        # Check all 4 corner tags are detected
+        """Update homography from detected tag corners."""
         if not all(tid in tag_corners for tid in CORNER_TAG_IDS):
             return False
 
-        # Extract inner corners (the corner facing screen center)
         src_points = []
         for tag_id in CORNER_TAG_IDS:
             corners = tag_corners[tag_id]
@@ -75,44 +74,31 @@ class ScreenMapper:
 
         self.camera_corners = np.array(src_points, dtype=np.float32)
 
-        # Compute homography: camera → screen
         self.homography = cv2.getPerspectiveTransform(
             self.camera_corners, self.screen_corners
         )
         self.inverse_homography = cv2.getPerspectiveTransform(
             self.screen_corners, self.camera_corners
         )
-
         return True
 
     def camera_to_screen(self, x: float, y: float) -> tuple[int, int] | None:
-        """
-        Map camera pixel to screen pixel.
-
-        Input: (x, y) in camera frame (the trapezoid)
-        Output: (x, y) in screen coordinates (the rectangle)
-        """
+        """Map camera pixel to screen pixel."""
         if self.homography is None:
             return None
 
         pt = np.array([[[x, y]]], dtype=np.float32)
         transformed = cv2.perspectiveTransform(pt, self.homography)
-
-        sx = int(round(transformed[0, 0, 0]))
-        sy = int(round(transformed[0, 0, 1]))
-        return (sx, sy)
+        return (int(round(transformed[0, 0, 0])), int(round(transformed[0, 0, 1])))
 
     def screen_to_camera(self, x: float, y: float) -> tuple[int, int] | None:
-        """Map screen pixel to camera pixel (inverse transform)."""
+        """Map screen pixel to camera pixel."""
         if self.inverse_homography is None:
             return None
 
         pt = np.array([[[x, y]]], dtype=np.float32)
         transformed = cv2.perspectiveTransform(pt, self.inverse_homography)
-
-        cx = int(round(transformed[0, 0, 0]))
-        cy = int(round(transformed[0, 0, 1]))
-        return (cx, cy)
+        return (int(round(transformed[0, 0, 0])), int(round(transformed[0, 0, 1])))
 
     def is_on_screen(self, sx: int, sy: int) -> bool:
         """Check if screen coordinates are within bounds."""
@@ -123,21 +109,143 @@ class ScreenMapper:
         return self.homography is not None
 
 
-def main():
-    cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+# =============================================================================
+# CAMERA FUNCTIONS
+# =============================================================================
 
-    # Setup AprilTag detector (tag16h5)
+def setup_camera(index: int = 0, width: int = CAMERA_WIDTH, height: int = CAMERA_HEIGHT) -> cv2.VideoCapture:
+    """Initialize and configure the camera."""
+    cap = cv2.VideoCapture(index)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    return cap
+
+
+def read_frame(cap: cv2.VideoCapture) -> np.ndarray | None:
+    """Read a frame from the camera."""
+    ret, frame = cap.read()
+    return frame if ret else None
+
+
+# =============================================================================
+# APRILTAG DETECTION FUNCTIONS
+# =============================================================================
+
+def create_detector() -> cv2.aruco.ArucoDetector:
+    """Create and configure the AprilTag detector."""
     aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_16h5)
     parameters = cv2.aruco.DetectorParameters()
     parameters.minMarkerPerimeterRate = 0.03
     parameters.errorCorrectionRate = 0.1
-    detector = cv2.aruco.ArucoDetector(aruco_dict, parameters)
+    return cv2.aruco.ArucoDetector(aruco_dict, parameters)
 
-    # Screen mapper
-    mapper = ScreenMapper()
 
+def detect_tags(detector: cv2.aruco.ArucoDetector, frame: np.ndarray) -> tuple[dict[int, np.ndarray], list, np.ndarray | None]:
+    """
+    Detect AprilTags in the frame.
+
+    Returns:
+        tag_corners: Dict mapping tag_id -> 4 corner points
+        all_corners: Raw corners from detector (for drawing)
+        ids: Detected marker IDs
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    corners, ids, _ = detector.detectMarkers(gray)
+
+    tag_corners = {}
+    if ids is not None:
+        for i, marker_id in enumerate(ids.flatten()):
+            if marker_id in CORNER_TAG_IDS:
+                tag_corners[marker_id] = corners[i].squeeze()
+
+    return tag_corners, corners, ids
+
+
+# =============================================================================
+# VISUALIZATION FUNCTIONS
+# =============================================================================
+
+def draw_detected_markers(frame: np.ndarray, corners: list, ids: np.ndarray | None) -> None:
+    """Draw the detected AprilTag markers."""
+    if ids is not None:
+        cv2.aruco.drawDetectedMarkers(frame, corners, ids)
+
+
+def draw_inner_corners(frame: np.ndarray, tag_corners: dict[int, np.ndarray]) -> None:
+    """Draw green circles on the inner corners used for calibration."""
+    for tag_id, crns in tag_corners.items():
+        inner_idx = INNER_CORNER[tag_id]
+        ix, iy = int(crns[inner_idx][0]), int(crns[inner_idx][1])
+        cv2.circle(frame, (ix, iy), 8, (0, 255, 0), -1)
+
+
+def draw_screen_quadrilateral(frame: np.ndarray, mapper: ScreenMapper) -> None:
+    """Draw magenta quadrilateral connecting the calibration points."""
+    if mapper.camera_corners is not None:
+        pts = mapper.camera_corners.astype(np.int32)
+        cv2.polylines(frame, [pts], True, (255, 0, 255), 2)
+
+
+def draw_calibration_status(frame: np.ndarray, mapper: ScreenMapper, tag_corners: dict) -> None:
+    """Draw calibration status text."""
+    if mapper.is_calibrated:
+        cv2.putText(frame, "CALIBRATED", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+    else:
+        detected = list(tag_corners.keys())
+        cv2.putText(frame, f"Detected: {detected} (need 0,1,2,3)", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+
+def draw_mouse_mapping(frame: np.ndarray, mapper: ScreenMapper, mouse_pos: tuple[int, int] | None) -> None:
+    """Draw mouse position and its mapped screen coordinates."""
+    if mouse_pos is None or not mapper.is_calibrated:
+        return
+
+    mx, my = mouse_pos
+    screen_pt = mapper.camera_to_screen(mx, my)
+    if screen_pt:
+        sx, sy = screen_pt
+        on_screen = mapper.is_on_screen(sx, sy)
+        color = (0, 255, 0) if on_screen else (0, 165, 255)
+
+        cv2.circle(frame, (mx, my), 6, color, -1)
+        cv2.putText(frame, f"Screen: ({sx}, {sy})",
+                    (mx + 10, my - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+
+def draw_info_bar(frame: np.ndarray, mapper: ScreenMapper) -> None:
+    """Draw information bar at the bottom of the frame."""
+    h, w = frame.shape[:2]
+    info = f"Camera: {w}x{h} | Screen: {mapper.screen_width}x{mapper.screen_height}"
+    cv2.putText(frame, info, (10, h - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+
+
+def draw_all(
+    frame: np.ndarray,
+    corners: list,
+    ids: np.ndarray | None,
+    tag_corners: dict[int, np.ndarray],
+    mapper: ScreenMapper,
+    mouse_pos: tuple[int, int] | None,
+) -> None:
+    """Draw all visualizations on the frame."""
+    draw_detected_markers(frame, corners, ids)
+    draw_inner_corners(frame, tag_corners)
+    draw_screen_quadrilateral(frame, mapper)
+    draw_calibration_status(frame, mapper, tag_corners)
+    draw_mouse_mapping(frame, mapper, mouse_pos)
+    draw_info_bar(frame, mapper)
+
+
+# =============================================================================
+# MAIN LOOP
+# =============================================================================
+
+def print_instructions() -> None:
+    """Print usage instructions to console."""
     print("=" * 50)
     print("AprilTag Screen Registration (tag16h5)")
     print("=" * 50)
@@ -149,85 +257,73 @@ def main():
     print("  Mouse - Show mapped screen coordinates")
     print()
 
+
+def create_mouse_callback():
+    """Create a mouse callback and return (callback_fn, position_getter)."""
     mouse_pos = [None]
 
     def on_mouse(event, x, y, flags, param):
         if event == cv2.EVENT_MOUSEMOVE:
             mouse_pos[0] = (x, y)
 
-    cv2.namedWindow("AprilTag Screen Registration")
-    cv2.setMouseCallback("AprilTag Screen Registration", on_mouse)
+    def get_pos():
+        return mouse_pos[0]
 
+    return on_mouse, get_pos
+
+
+def process_frame(
+    frame: np.ndarray,
+    detector: cv2.aruco.ArucoDetector,
+    mapper: ScreenMapper,
+    mouse_pos: tuple[int, int] | None,
+) -> None:
+    """Process a single frame: detect, update, draw."""
+    # Detect tags
+    tag_corners, corners, ids = detect_tags(detector, frame)
+
+    # Update homography
+    mapper.update(tag_corners)
+
+    # Draw visualizations
+    draw_all(frame, corners, ids, tag_corners, mapper, mouse_pos)
+
+
+def run_demo(camera_index: int = 0) -> None:
+    """Run the interactive demo."""
+    print_instructions()
+
+    # Setup
+    cap = setup_camera(camera_index)
+    detector = create_detector()
+    mapper = ScreenMapper()
+
+    # Window and mouse
+    window_name = "AprilTag Screen Registration"
+    cv2.namedWindow(window_name)
+    mouse_callback, get_mouse_pos = create_mouse_callback()
+    cv2.setMouseCallback(window_name, mouse_callback)
+
+    # Main loop
     while True:
-        ret, frame = cap.read()
-        if not ret:
+        frame = read_frame(cap)
+        if frame is None:
             break
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        corners, ids, _ = detector.detectMarkers(gray)
-
-        # Build tag corners dict
-        tag_corners = {}
-        if ids is not None:
-            for i, marker_id in enumerate(ids.flatten()):
-                if marker_id in CORNER_TAG_IDS:
-                    # corners[i] shape: (1, 4, 2) → squeeze to (4, 2)
-                    tag_corners[marker_id] = corners[i].squeeze()
-
-        # Update homography
-        mapper.update(tag_corners)
-
-        # Draw detected markers
-        if ids is not None:
-            cv2.aruco.drawDetectedMarkers(frame, corners, ids)
-
-        # Draw inner corners (green) and screen quadrilateral (magenta)
-        for tag_id, crns in tag_corners.items():
-            inner_idx = INNER_CORNER[tag_id]
-            ix, iy = int(crns[inner_idx][0]), int(crns[inner_idx][1])
-            cv2.circle(frame, (ix, iy), 8, (0, 255, 0), -1)
-
-        if mapper.camera_corners is not None:
-            pts = mapper.camera_corners.astype(np.int32)
-            cv2.polylines(frame, [pts], True, (255, 0, 255), 2)
-
-        # Status
-        if mapper.is_calibrated:
-            cv2.putText(frame, "CALIBRATED", (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-        else:
-            detected = list(tag_corners.keys())
-            cv2.putText(frame, f"Detected: {detected} (need 0,1,2,3)", (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
-        # Show mouse mapping
-        if mouse_pos[0] and mapper.is_calibrated:
-            mx, my = mouse_pos[0]
-            screen_pt = mapper.camera_to_screen(mx, my)
-            if screen_pt:
-                sx, sy = screen_pt
-                on_screen = mapper.is_on_screen(sx, sy)
-                color = (0, 255, 0) if on_screen else (0, 165, 255)
-
-                cv2.circle(frame, (mx, my), 6, color, -1)
-                cv2.putText(frame, f"Screen: ({sx}, {sy})",
-                           (mx + 10, my - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
-        # Show info
-        h, w = frame.shape[:2]
-        info = f"Camera: {w}x{h} | Screen: {mapper.screen_width}x{mapper.screen_height}"
-        cv2.putText(frame, info, (10, h - 10),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-
-        cv2.imshow("AprilTag Screen Registration", frame)
+        process_frame(frame, detector, mapper, get_mouse_pos())
+        cv2.imshow(window_name, frame)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
+    # Cleanup
     cap.release()
     cv2.destroyAllWindows()
 
 
+# =============================================================================
+# ENTRY POINT
+# =============================================================================
+
 if __name__ == "__main__":
-    main()
+    run_demo()
