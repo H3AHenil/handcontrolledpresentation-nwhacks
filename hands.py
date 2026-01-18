@@ -8,18 +8,22 @@ import cv2
 import mediapipe as mp
 import time
 
-from src.config import (
+from src.hand_gestures import (
     VIEW_MODE, MAX_NUM_HANDS,
-    DISPLAY_FLIP, PROCESS_FLIP,
-    STRETCH_REQUIRE_POINTERS,
+    HandFeatures,
+    extract_features,
+    get_handedness_label,
+    HandState,
+    DetectedHand,
+    is_pointer,
+    is_two_finger_pose,
+    update_pinch,
+    update_thumbrot,
+    update_two_finger_swipe,
+    ClapDetector,
+    StretchDetector,
 )
-from src.features import extract_features, get_handedness_label, HandFeatures
-from src.gestures import (
-    HandState, DetectedHand,
-    is_pointer, is_two_finger_pose,
-    update_pinch, update_thumbrot, update_two_finger_swipe,
-    ClapDetector, StretchDetector,
-)
+from src.hand_gestures.config import DISPLAY_FLIP, PROCESS_FLIP, STRETCH_REQUIRE_POINTERS
 
 mp_drawing = mp.solutions.drawing_utils
 mp_hands = mp.solutions.hands
