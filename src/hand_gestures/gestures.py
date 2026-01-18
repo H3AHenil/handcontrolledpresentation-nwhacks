@@ -181,16 +181,16 @@ def update_thumbrot(
 def update_two_finger_swipe(
     state: HandState, feats: HandFeatures, now: float, 
     two_finger: bool, suppressed: bool
-) -> bool:
+) -> tuple[bool, str | None]:
     """
     Update two-finger swipe detection.
     
     Returns:
-        Whether a swipe was just detected
+        (detected, direction) - direction is "left" or "right" if detected, None otherwise
     """
     if not two_finger or suppressed or now < state.tfs_cooldown_until:
         state.tfs_track.clear()
-        return False
+        return False, None
 
     x_tips = 0.5 * (feats.index_tip_px[0] + feats.middle_tip_px[0])
     palm_x = feats.palm_center_px[0]
@@ -203,7 +203,7 @@ def update_two_finger_swipe(
         state.tfs_track.popleft()
 
     if len(state.tfs_track) < 3:
-        return False
+        return False, None
 
     t0, x0, a0 = state.tfs_track[0]
     t1, x1, a1 = state.tfs_track[-1]
@@ -223,13 +223,14 @@ def update_two_finger_swipe(
 
     if (peak_dx >= TFS_MIN_PEAK_DIST_PX and peak_speed >= TFS_MIN_PEAK_SPEED_PX_S
         and consistency >= TFS_DIR_CONSISTENCY_MIN and (flick_ok or strong_motion_ok)):
-        print(f"[{_timestamp()}] {state.label}: TwoFingerSwipe")
+        direction = "right" if net_dx > 0 else "left"
+        print(f"[{_timestamp()}] {state.label}: TwoFingerSwipe ({direction})")
         state.latch("TwoFingerSwipe", now, TWO_FINGER_SWIPE_LATCH_S)
         state.tfs_cooldown_until = now + TFS_COOLDOWN_S
         state.tfs_track.clear()
-        return True
+        return True, direction
 
-    return False
+    return False, None
 
 
 # =============================================================================

@@ -4,10 +4,13 @@ Integrated Hand Gesture and Screen Tracker.
 Combines:
 - Gesture detection (Pointer, Pinch, TwoFingerSwipe, Stretch, HandRot, Clap)
 - AprilTag-based screen coordinate mapping
+- UDP backend service for remote control
 """
 
 import cv2
 import time
+from dataclasses import dataclass
+from typing import Literal
 
 from apriltage import CAMERA_WIDTH, CAMERA_HEIGHT
 from src.hand_gestures import (
@@ -26,6 +29,7 @@ from src.hand_gestures import (
 )
 from src.hand_gestures.config import DISPLAY_FLIP, PROCESS_FLIP, STRETCH_REQUIRE_POINTERS
 from src.hand_tracks import MultiScreenMapper, TrackerDisplay, ScreenResult
+from backend_service import GestureBackendService
 
 import mediapipe as mp
 
@@ -79,6 +83,18 @@ def _draw_overlay(frame, overlay: list[str]):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
 
 
+@dataclass
+class FrameGestureData:
+    """Aggregated gesture data for a single frame."""
+    detected: list[DetectedHand]
+    overlay: list[str]
+    clap_active: bool
+    stretch_active: bool
+    stretch_cumulative: float
+    swipe_detected: bool
+    swipe_direction: Literal["left", "right"] | None
+
+
 def process_hands(
     frame,
     results,
@@ -86,12 +102,12 @@ def process_hands(
     clap_detector: ClapDetector,
     stretch_detector: StretchDetector,
     now: float,
-) -> tuple[list[DetectedHand], list[str]]:
+) -> FrameGestureData:
     """
-    Process hand detection results and return detected hands + overlay text.
+    Process hand detection results and return detected hands + gesture data.
     
     Returns:
-        (detected_hands, overlay_lines)
+        FrameGestureData with all gesture information for the frame
     """
     h, w = frame.shape[:2]
     detected: list[DetectedHand] = []
@@ -152,10 +168,16 @@ def process_hands(
         overlay.append("GLOBAL: Clap")
 
     # Two-finger swipe detection
+    swipe_detected = False
+    swipe_direction: Literal["left", "right"] | None = None
     for d in detected:
         state = states[d.label]
         suppressed = clap_active or clap_intent or d.thumbrot or d.pinch
-        update_two_finger_swipe(state, d.feats, now, d.two_finger, suppressed)
+        detected_swipe, direction = update_two_finger_swipe(state, d.feats, now, d.two_finger, suppressed)
+        if detected_swipe and direction:
+            swipe_detected = True
+            swipe_direction = direction
+            overlay.append(f"SWIPE: {direction}")
 
     # Stretch detection
     stretch_active, stretch_delta, stretch_speed, stretch_cumulative = (
@@ -180,7 +202,15 @@ def process_hands(
     else:
         overlay.append("No hands detected")
 
-    return detected, overlay
+    return FrameGestureData(
+        detected=detected,
+        overlay=overlay,
+        clap_active=clap_active,
+        stretch_active=stretch_active,
+        stretch_cumulative=stretch_cumulative,
+        swipe_detected=swipe_detected,
+        swipe_direction=swipe_direction,
+    )
 
 
 def get_pointer_finger(detected: list[DetectedHand]) -> tuple[int, int] | None:
@@ -191,9 +221,30 @@ def get_pointer_finger(detected: list[DetectedHand]) -> tuple[int, int] | None:
     return None
 
 
-def run_integrated_tracker(camera_index: int = 0) -> None:
-    """Run the integrated hand gesture and screen tracker."""
+def run_integrated_tracker(
+    camera_index: int = 0,
+    enable_udp: bool = True,
+    udp_ip: str = "127.0.0.1",
+    udp_gesture_port: int = 9090,
+    udp_legacy_port: int = 8080,
+    broadcast: bool = False,
+) -> None:
+    """
+    Run the integrated hand gesture and screen tracker.
+    
+    Args:
+        camera_index: Camera device index
+        enable_udp: Whether to enable UDP backend service
+        udp_ip: Target IP for UDP commands
+        udp_gesture_port: Port for gesture JSON protocol
+        udp_legacy_port: Port for legacy text protocol
+        broadcast: Whether to use UDP broadcast mode
+    """
     print(INSTRUCTIONS)
+    if enable_udp:
+        print(f"UDP Backend: Enabled (target={udp_ip}:{udp_gesture_port})")
+    else:
+        print("UDP Backend: Disabled")
 
     cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
@@ -211,7 +262,14 @@ def run_integrated_tracker(camera_index: int = 0) -> None:
     # Screen mapping
     mapper = MultiScreenMapper()
 
-    with mp_hands.Hands(
+    # Backend service for UDP
+    with GestureBackendService(
+        gesture_port=udp_gesture_port,
+        legacy_port=udp_legacy_port,
+        target_ip=udp_ip,
+        broadcast=broadcast,
+        enabled=enable_udp,
+    ) as backend, mp_hands.Hands(
         static_image_mode=False,
         max_num_hands=MAX_NUM_HANDS,
         model_complexity=1,
@@ -238,28 +296,39 @@ def run_integrated_tracker(camera_index: int = 0) -> None:
             results = hands.process(rgb)
 
             # Get gesture detection results
-            detected, overlay = process_hands(
+            gesture_data = process_hands(
                 frame, results, states, clap_detector, stretch_detector, now
             )
 
             # Get pointer finger position for screen mapping
-            finger_pos = get_pointer_finger(detected)
+            finger_pos = get_pointer_finger(gesture_data.detected)
             screen_result: ScreenResult | None = None
 
             if finger_pos:
                 screen_result = mapper.find_screen(*finger_pos)
                 if screen_result:
-                    overlay.append(
+                    gesture_data.overlay.append(
                         f"Screen {screen_result.screen_idx}: "
                         f"({screen_result.rel_x:.3f}, {screen_result.rel_y:.3f})"
                     )
+
+            # Send gesture data to UDP backend
+            backend.process_frame(
+                detected=gesture_data.detected,
+                screen_result=screen_result,
+                clap_active=gesture_data.clap_active,
+                stretch_active=gesture_data.stretch_active,
+                stretch_cumulative=gesture_data.stretch_cumulative,
+                swipe_detected=gesture_data.swipe_detected,
+                swipe_direction=gesture_data.swipe_direction,
+            )
 
             # Render screen boundaries and finger marker
             display.render(frame, mapper, finger_pos, screen_result)
 
             # Display
             display_frame = cv2.flip(frame, 1) if DISPLAY_FLIP else frame
-            _draw_overlay(display_frame, overlay)
+            _draw_overlay(display_frame, gesture_data.overlay)
 
             key = display.show(display_frame)
             if key in (ord("q"), 27):
@@ -274,6 +343,16 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Integrated Hand Gesture + Screen Tracker")
     parser.add_argument("-c", "--camera", type=int, default=0, help="Camera index")
+    parser.add_argument("--no-udp", action="store_true", help="Disable UDP backend")
+    parser.add_argument("--udp-ip", type=str, default="127.0.0.1", help="UDP target IP")
+    parser.add_argument("--udp-port", type=int, default=9090, help="UDP gesture port")
+    parser.add_argument("--broadcast", action="store_true", help="Use UDP broadcast mode")
     args = parser.parse_args()
 
-    run_integrated_tracker(camera_index=args.camera)
+    run_integrated_tracker(
+        camera_index=args.camera,
+        enable_udp=not args.no_udp,
+        udp_ip=args.udp_ip,
+        udp_gesture_port=args.udp_port,
+        broadcast=args.broadcast,
+    )
