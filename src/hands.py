@@ -97,13 +97,35 @@ def mean_point3(points):
     return (x, y, z)
 
 
+def sub3(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def dot3(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def cross3(a, b):
+    return (a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0])
+
+
+def norm3(a):
+    return math.sqrt(dot3(a, a)) + 1e-9
+
+
+def normalize3(a):
+    n = norm3(a)
+    return (a[0] / n, a[1] / n, a[2] / n)
+
+
 def angle_3pt_deg(a, b, c):
     bax = (a[0] - b[0], a[1] - b[1], a[2] - b[2])
     bcx = (c[0] - b[0], c[1] - b[1], c[2] - b[2])
-    ba_len = math.sqrt(bax[0] ** 2 + bax[1] ** 2 + bax[2] ** 2) + 1e-9
-    bc_len = math.sqrt(bcx[0] ** 2 + bcx[1] ** 2 + bcx[2] ** 2) + 1e-9
-    dot = bax[0] * bcx[0] + bax[1] * bcx[1] + bax[2] * bcx[2]
-    cosang = clamp(dot / (ba_len * bc_len), -1.0, 1.0)
+    ba_len = norm3(bax)
+    bc_len = norm3(bcx)
+    cosang = clamp(dot3(bax, bcx) / (ba_len * bc_len), -1.0, 1.0)
     return math.degrees(math.acos(cosang))
 
 
@@ -126,11 +148,27 @@ def handedness_label(h):
     return lbl
 
 
-def yaw_pitch_from_thumb_vec(vx, vy, vz):
+def yaw_pitch_from_vec(vx, vy, vz):
     forward = max(1e-6, -vz)
     yaw = math.degrees(math.atan2(vx, forward))
     pitch = math.degrees(math.atan2(-vy, forward))
     return yaw, pitch
+
+
+def hand_orientation_angles(wrist3, index_mcp3, pinky_mcp3, middle_mcp3):
+    across = normalize3(sub3(index_mcp3, pinky_mcp3))
+    forward = normalize3(sub3(middle_mcp3, wrist3))
+    normal = normalize3(cross3(across, forward))
+
+    yaw, pitch = yaw_pitch_from_vec(forward[0], forward[1], forward[2])
+
+    roll = math.degrees(math.atan2(across[1], across[0]))
+    if roll > 180:
+        roll -= 360
+    if roll < -180:
+        roll += 360
+
+    return yaw, pitch, roll, forward, normal, across
 
 
 def latch(st, label, now, hold_s):
@@ -189,14 +227,7 @@ def extract(px, n3):
     ring_curled = is_curled(rng_ang, rng_tip_r)
     pinky_curled = is_curled(pky_ang, pky_tip_r)
 
-    tv = (
-        n3[TH_TIP][0] - n3[TH_MCP][0],
-        n3[TH_TIP][1] - n3[TH_MCP][1],
-        n3[TH_TIP][2] - n3[TH_MCP][2],
-    )
-    tv_len = math.sqrt(tv[0] ** 2 + tv[1] ** 2 + tv[2] ** 2) + 1e-9
-    tvu = (tv[0] / tv_len, tv[1] / tv_len, tv[2] / tv_len)
-
+    thumb_vec = normalize3(sub3(n3[TH_TIP], n3[TH_MCP]))
     thumb_strong = (th_ang >= THUMB_MIN_IP_ANGLE_DEG) and (th_tip_r >= THUMB_TIP_RATIO_3)
 
     wx, wy = px[WRIST]
@@ -208,19 +239,28 @@ def extract(px, n3):
         "palm_center_3": palm_center_3,
         "palm_center_px": palm_center_px,
         "flick_angle_deg": flick_angle_deg,
+
+        "wrist_3": n3[WRIST],
+        "index_mcp_3": n3[IX_MCP],
+        "pinky_mcp_3": n3[PK_MCP],
+        "middle_mcp_3": n3[MD_MCP],
+
         "index_tip_px": px[IX_TIP],
         "middle_tip_px": px[MD_TIP],
         "index_tip_3": n3[IX_TIP],
         "thumb_tip_3": n3[TH_TIP],
+
         "index_ext": index_ext,
         "middle_ext": middle_ext,
         "ring_ext": ring_ext,
         "pinky_ext": pinky_ext,
+
         "index_curled": index_curled,
         "middle_curled": middle_curled,
         "ring_curled": ring_curled,
         "pinky_curled": pinky_curled,
-        "thumb_vec_u": tvu,
+
+        "thumb_vec_u": thumb_vec,
         "thumb_strong": thumb_strong,
     }
 
@@ -234,13 +274,16 @@ def main():
     state = {k: {
         "latched_label": "Neutral",
         "latched_until": 0.0,
+
         "pinch_active": False,
         "pinch_prev": False,
         "last_pinch_still_log": 0.0,
+
         "thumbs_active": False,
         "thumbs_enter": 0,
         "thumbs_exit": 0,
         "last_thumb_log": 0.0,
+
         "tfs_track": deque(),
         "tfs_cooldown_until": 0.0,
     } for k in ["Left", "Right", "Unknown"]}
@@ -248,7 +291,6 @@ def main():
     clap_latched_until = 0.0
     clap_cooldown_until = 0.0
     clap_armed = True
-
     pair_hist = deque(maxlen=6)
 
     last_seen = {
@@ -347,12 +389,14 @@ def main():
                         st["thumbs_active"] = False
                         print(f"[{time.strftime('%H:%M:%S')}] {lbl}: EXIT ThumbRot")
 
-                    yaw_deg = pitch_deg = None
+                    yaw_deg = pitch_deg = roll_deg = None
                     if st["thumbs_active"]:
-                        yaw_deg, pitch_deg = yaw_pitch_from_thumb_vec(vx, vy, vz)
+                        yaw_deg, pitch_deg, roll_deg, _, _, _ = hand_orientation_angles(
+                            feats["wrist_3"], feats["index_mcp_3"], feats["pinky_mcp_3"], feats["middle_mcp_3"]
+                        )
                         if (now - st["last_thumb_log"]) >= THUMBS_LOG_INTERVAL_S:
                             st["last_thumb_log"] = now
-                            print(f"[{time.strftime('%H:%M:%S')}] {lbl}: ThumbRot yaw={yaw_deg:+.1f} pitch={pitch_deg:+.1f}")
+                            print(f"[{time.strftime('%H:%M:%S')}] {lbl}: HandRot yaw={yaw_deg:+.1f} pitch={pitch_deg:+.1f} roll={roll_deg:+.1f}")
 
                     thumb_index = dist3(feats["thumb_tip_3"], feats["index_tip_3"]) / feats["hand_scale_3"]
                     if st["thumbs_active"] or two_finger_pose:
@@ -397,7 +441,8 @@ def main():
                         "pinch": st["pinch_active"],
                         "thumbrot": st["thumbs_active"],
                         "yaw": yaw_deg,
-                        "pitch": pitch_deg
+                        "pitch": pitch_deg,
+                        "roll": roll_deg
                     })
 
             clap_active = now < clap_latched_until
@@ -535,7 +580,7 @@ def main():
                     st = state[lbl]
 
                     if d["thumbrot"]:
-                        disp = "ThumbRot"
+                        disp = "HandRot"
                     elif now < st["latched_until"]:
                         disp = st["latched_label"]
                     elif d["pinch"]:
@@ -547,8 +592,8 @@ def main():
                     else:
                         disp = "Neutral"
 
-                    if d["thumbrot"] and d["yaw"] is not None and d["pitch"] is not None:
-                        overlay.append(f"{lbl}: {disp}  yaw={d['yaw']:+.1f}  pitch={d['pitch']:+.1f}")
+                    if d["thumbrot"] and d["yaw"] is not None and d["pitch"] is not None and d["roll"] is not None:
+                        overlay.append(f"{lbl}: {disp}  yaw={d['yaw']:+.1f}  pitch={d['pitch']:+.1f}  roll={d['roll']:+.1f}")
                     else:
                         overlay.append(f"{lbl}: {disp}")
 
@@ -570,7 +615,7 @@ def main():
                 cv2.putText(display_frame, s, (x0, y0 + i * line_h),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
 
-            cv2.imshow("Gestures: Pointer / Pinch / TwoFingerSwipe / StretchDelta / ThumbRot / Clap", display_frame)
+            cv2.imshow("Gestures: Pointer / Pinch / TwoFingerSwipe / StretchDelta / HandRot / Clap", display_frame)
 
             key = cv2.waitKey(1) & 0xFF
             if key == 27 or key == ord('q'):
