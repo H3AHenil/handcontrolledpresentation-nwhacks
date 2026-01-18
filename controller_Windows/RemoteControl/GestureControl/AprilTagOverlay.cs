@@ -264,47 +264,47 @@ public class AprilTagOverlay : Window
     private bool[,] GetTag16h5Pattern(int tagId)
     {
         // Official AprilTag 16h5 family - 30 tags (0-29)
-        // Extracted from: https://github.com/AprilRobotics/apriltag/blob/master/tag16h5.c
+        // Source: https://github.com/AprilRobotics/apriltag/blob/master/tag16h5.c
         //
         // AprilTag 16h5 structure:
         // - Total grid: 6x6 cells
         // - Outer border: 1 cell black border (always black)
         // - Inner data: 4x4 cells (16 bits of data)
         //
-        // The codes below represent the 4x4 inner data area (16 bits)
-        // Bit layout: row-major order, bit 15 = top-left, bit 0 = bottom-right
-        // 1 = black (foreground), 0 = white (background)
+        // The codes represent the 4x4 inner data area (16 bits)
+        // 1 = black, 0 = white
+        // Bit layout: MSB (bit 15) = top-left, LSB (bit 0) = bottom-right
         ushort[] tag16h5Codes = {
-            0x4E7B, // Tag 0:  0100 1110 0111 1011
-            0xD629, // Tag 1:  1101 0110 0010 1001
-            0x7D4B, // Tag 2:  0111 1101 0100 1011
-            0xB235, // Tag 3:  1011 0010 0011 0101
-            0x6AD5, // Tag 4:  0110 1010 1101 0101
-            0x4DAD, // Tag 5:  0100 1101 1010 1101
-            0x2F6B, // Tag 6:  0010 1111 0110 1011
-            0x9DB5, // Tag 7:  1001 1101 1011 0101
-            0x5C9B, // Tag 8:  0101 1100 1001 1011
-            0xD2D3, // Tag 9:  1101 0010 1101 0011
-            0xB4CB, // Tag 10: 1011 0100 1100 1011
-            0x6D95, // Tag 11: 0110 1101 1001 0101
-            0x396D, // Tag 12: 0011 1001 0110 1101
-            0xCA5B, // Tag 13: 1100 1010 0101 1011
-            0xB269, // Tag 14: 1011 0010 0110 1001
-            0x5AD3, // Tag 15: 0101 1010 1101 0011
-            0x9B4D, // Tag 16: 1001 1011 0100 1101
-            0xD693, // Tag 17: 1101 0110 1001 0011
-            0xA5B5, // Tag 18: 1010 0101 1011 0101
-            0x596B, // Tag 19: 0101 1001 0110 1011
-            0xB2D5, // Tag 20: 1011 0010 1101 0101
-            0x6B59, // Tag 21: 0110 1011 0101 1001
-            0x4D6B, // Tag 22: 0100 1101 0110 1011
-            0xD356, // Tag 23: 1101 0011 0101 0110
-            0x9AD5, // Tag 24: 1001 1010 1101 0101
-            0x56D3, // Tag 25: 0101 0110 1101 0011
-            0xAD59, // Tag 26: 1010 1101 0101 1001
-            0xCB25, // Tag 27: 1100 1011 0010 0101
-            0x934D, // Tag 28: 1001 0011 0100 1101
-            0x66B3, // Tag 29: 0110 0110 1011 0011
+            0x231b, // Tag 0
+            0x2ea5, // Tag 1
+            0x346a, // Tag 2
+            0x45b9, // Tag 3
+            0x79a6, // Tag 4
+            0x7f6b, // Tag 5
+            0xb358, // Tag 6
+            0xe745, // Tag 7
+            0xfe59, // Tag 8
+            0x156d, // Tag 9
+            0x380b, // Tag 10
+            0xf0ab, // Tag 11
+            0x0d84, // Tag 12
+            0x4736, // Tag 13
+            0x8c72, // Tag 14
+            0xaf10, // Tag 15
+            0x093c, // Tag 16
+            0x93b4, // Tag 17
+            0xa503, // Tag 18
+            0x468f, // Tag 19
+            0xe137, // Tag 20
+            0x5795, // Tag 21
+            0xdf42, // Tag 22
+            0x1c1d, // Tag 23
+            0xe9dc, // Tag 24
+            0x73ad, // Tag 25
+            0xad5f, // Tag 26
+            0xd530, // Tag 27
+            0x07ca, // Tag 28
+            0xaf2e, // Tag 29
         };
         
         if (tagId < 0 || tagId >= tag16h5Codes.Length)
