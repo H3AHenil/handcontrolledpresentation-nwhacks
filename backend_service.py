@@ -192,10 +192,6 @@ class GestureBackendService:
         """Process a single hand's gestures."""
         label = d.label
         
-        # Handle pointer mode - send cursor position and update last known position
-        if d.pointer and screen_result:
-            self._send_pointer(screen_result, label)
-        
         # Get position to use (current screen_result or last known position)
         if screen_result:
             pos_x, pos_y = screen_result.rel_x, screen_result.rel_y
@@ -208,13 +204,18 @@ class GestureBackendService:
             pos_x, pos_y = self._state.last_pos.get(label, (0.5, 0.5))
             screen_idx = self._state.last_screen_idx.get(label, -1)
         
-        # Handle pinch transitions
+        # Handle pointer mode - send cursor position (only when NOT pinching)
+        if d.pointer and screen_result and not d.pinch:
+            self._send_pointer(screen_result, label)
+        
+        # Handle pinch - for drag operations, send continuous position updates
         prev_pinch = self._state.prev_pinch.get(label, False)
-        if d.pinch and not prev_pinch:
-            # Pinch started - send mouse down at current/last known position
+        if d.pinch:
+            # Send pinch with current position every frame for smooth drag
+            # The C# side should: move cursor to (x,y) and hold mouse down
             self._send_pinch(pos_x, pos_y, active=True, screen_index=screen_idx)
-        elif not d.pinch and prev_pinch:
-            # Pinch ended - send mouse up
+        elif prev_pinch and not d.pinch:
+            # Pinch just ended - send mouse up
             self._send_pinch(pos_x, pos_y, active=False, screen_index=screen_idx)
         self._state.prev_pinch[label] = d.pinch
         
