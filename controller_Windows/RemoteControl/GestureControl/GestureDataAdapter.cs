@@ -236,6 +236,9 @@ public class GestureDataAdapter
     {
         if (data.IsPinchActive && !_wasPinchActive)
         {
+            // IMPORTANT: Move cursor to position BEFORE mouse down
+            // This prevents cursor drift when pinch starts
+            _handler.UpdateFingerPosition(data.NormalizedX, data.NormalizedY, 1, data.ScreenIndex);
             _handler.StartPinch();
             _wasPinchActive = true;
         }
@@ -244,9 +247,12 @@ public class GestureDataAdapter
             _handler.EndPinch();
             _wasPinchActive = false;
         }
-        
-        // Also update position while pinching for drag operations
-        _handler.UpdateFingerPosition(data.NormalizedX, data.NormalizedY, 1, data.ScreenIndex);
+        else if (data.IsPinchActive)
+        {
+            // During ongoing pinch, still update position for drag operations
+            // but with the locked position from Python, this won't cause drift
+            _handler.UpdateFingerPosition(data.NormalizedX, data.NormalizedY, 1, data.ScreenIndex);
+        }
     }
     
     /// <summary>
