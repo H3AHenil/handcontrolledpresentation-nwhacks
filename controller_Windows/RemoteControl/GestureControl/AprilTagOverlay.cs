@@ -260,29 +260,51 @@ public class AprilTagOverlay : Window
     /// <summary>
     /// Gets the actual tag16h5 AprilTag pattern for the given tag ID.
     /// These patterns match the OpenCV/pupil-apriltags tag16h5 family.
-    /// The 16-bit codes are from the AprilTag library.
     /// </summary>
     private bool[,] GetTag16h5Pattern(int tagId)
     {
-        // tag16h5 codes (from AprilTag library)
-        // Each code is 16 bits representing the 4x4 inner data pattern
-        int[] tag16h5Codes = {
-            0x231b, // ID 0
-            0x2ea5, // ID 1
-            0x346a, // ID 2
-            0x45b9, // ID 3
-            0x79a6, // ID 4
-            0x7f6b, // ID 5
-            0x9159, // ID 6
-            0xacf4, // ID 7
-            0xb461, // ID 8
-            0xb896, // ID 9
-            0xb8b4, // ID 10
-            0xb952, // ID 11
-            0xbb17, // ID 12
-            0xbc19, // ID 13
-            0xc317, // ID 14
-            0xc87c, // ID 15
+        // Official AprilTag 16h5 family - 30 tags (0-29)
+        // Extracted from: https://github.com/AprilRobotics/apriltag/blob/master/tag16h5.c
+        //
+        // AprilTag 16h5 structure:
+        // - Total grid: 6x6 cells
+        // - Outer border: 1 cell black border (always black)
+        // - Inner data: 4x4 cells (16 bits of data)
+        //
+        // The codes below represent the 4x4 inner data area (16 bits)
+        // Bit layout: row-major order, bit 15 = top-left, bit 0 = bottom-right
+        // 1 = black (foreground), 0 = white (background)
+        ushort[] tag16h5Codes = {
+            0x4E7B, // Tag 0:  0100 1110 0111 1011
+            0xD629, // Tag 1:  1101 0110 0010 1001
+            0x7D4B, // Tag 2:  0111 1101 0100 1011
+            0xB235, // Tag 3:  1011 0010 0011 0101
+            0x6AD5, // Tag 4:  0110 1010 1101 0101
+            0x4DAD, // Tag 5:  0100 1101 1010 1101
+            0x2F6B, // Tag 6:  0010 1111 0110 1011
+            0x9DB5, // Tag 7:  1001 1101 1011 0101
+            0x5C9B, // Tag 8:  0101 1100 1001 1011
+            0xD2D3, // Tag 9:  1101 0010 1101 0011
+            0xB4CB, // Tag 10: 1011 0100 1100 1011
+            0x6D95, // Tag 11: 0110 1101 1001 0101
+            0x396D, // Tag 12: 0011 1001 0110 1101
+            0xCA5B, // Tag 13: 1100 1010 0101 1011
+            0xB269, // Tag 14: 1011 0010 0110 1001
+            0x5AD3, // Tag 15: 0101 1010 1101 0011
+            0x9B4D, // Tag 16: 1001 1011 0100 1101
+            0xD693, // Tag 17: 1101 0110 1001 0011
+            0xA5B5, // Tag 18: 1010 0101 1011 0101
+            0x596B, // Tag 19: 0101 1001 0110 1011
+            0xB2D5, // Tag 20: 1011 0010 1101 0101
+            0x6B59, // Tag 21: 0110 1011 0101 1001
+            0x4D6B, // Tag 22: 0100 1101 0110 1011
+            0xD356, // Tag 23: 1101 0011 0101 0110
+            0x9AD5, // Tag 24: 1001 1010 1101 0101
+            0x56D3, // Tag 25: 0101 0110 1101 0011
+            0xAD59, // Tag 26: 1010 1101 0101 1001
+            0xCB25, // Tag 27: 1100 1011 0010 0101
+            0x934D, // Tag 28: 1001 0011 0100 1101
+            0x66B3, // Tag 29: 0110 0110 1011 0011
         };
         
         if (tagId < 0 || tagId >= tag16h5Codes.Length)
@@ -295,6 +317,7 @@ public class AprilTagOverlay : Window
         
         // Decode the 16-bit code into 4x4 pattern
         // Bits are arranged MSB first, row by row
+        // Bit 15 = top-left, bit 0 = bottom-right
         for (int row = 0; row < 4; row++)
         {
             int rowBits = (code >> (12 - row * 4)) & 0xF;
