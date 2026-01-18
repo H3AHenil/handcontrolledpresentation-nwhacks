@@ -1,0 +1,68 @@
+<Window x:Class="TestOnRemoteControl.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="Hand Gesture Remote Control" Height="500" Width="850">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Control Panel -->
+        <Border Grid.Row="0" Background="#2D2D30" Padding="10">
+            <StackPanel>
+                <TextBlock Text="Hand Gesture Remote Control" FontSize="18" FontWeight="Bold" Foreground="White" Margin="0,0,0,10"/>
+                
+                <WrapPanel>
+                    <Button x:Name="StartGestureListenerButton" Content="Start Gesture Listener (Port 9090)" 
+                            Click="OnStartGestureListener" Width="220" Height="32" Margin="0,0,10,5"/>
+                    <Button x:Name="StopGestureListenerButton" Content="Stop Gesture Listener" 
+                            Click="OnStopGestureListener" Width="150" Height="32" Margin="0,0,10,5" IsEnabled="False"/>
+                    <Button Content="Select Screen" Click="OnSelectScreen" Width="100" Height="32" Margin="0,0,10,5"/>
+                    <Button Content="Demo Window" Click="OnOpenDemoWindow" Width="100" Height="32" Margin="0,0,10,5"/>
+                </WrapPanel>
+                
+                <WrapPanel Margin="0,5,0,0">
+                    <Button x:Name="AprilTagButton" Content="Show AprilTags" Click="OnToggleAprilTags" Width="120" Height="32" Margin="0,0,10,5"/>
+                    <Button x:Name="LaserTestButton" Content="Test Laser Pointer" Click="OnTestLaserPointer" Width="130" Height="32" Margin="0,0,10,5"/>
+                </WrapPanel>
+                
+                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                    <TextBlock Text="Status: " Foreground="Gray"/>
+                    <TextBlock x:Name="StatusLabel" Text="Idle" Foreground="#4CAF50"/>
+                    <TextBlock Text="  |  Mode: " Foreground="Gray" Margin="20,0,0,0"/>
+                    <TextBlock x:Name="GestureModeLabel" Text="Cursor" Foreground="#2196F3"/>
+                    <TextBlock Text="  |  Target: " Foreground="Gray" Margin="20,0,0,0"/>
+                    <TextBlock x:Name="TargetScreenLabel" Text="Screen 1" Foreground="#FF9800"/>
+                    <TextBlock Text="  |  AprilTags: " Foreground="Gray" Margin="20,0,0,0"/>
+                    <TextBlock x:Name="AprilTagStatusLabel" Text="Off" Foreground="Gray"/>
+                </StackPanel>
+            </StackPanel>
+        </Border>
+        
+        <!-- Activity Log -->
+        <Border Grid.Row="1" Background="#1E1E1E" MaxHeight="120">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <TextBlock x:Name="ActivityLog" Foreground="#00FF00" FontFamily="Consolas" Padding="10" TextWrapping="Wrap" FontSize="11"/>
+            </ScrollViewer>
+        </Border>
+
+        <!-- Touch/Swipe Area -->
+        <Grid Grid.Row="2" Background="#333333" 
+              IsManipulationEnabled="True"
+              ManipulationDelta="OnManipulationDelta"
+              ManipulationCompleted="OnManipulationCompleted">
+
+            <TextBlock Text="Swipe in this area to control the mouse&#x0a;(pinch = zoom / pan = move)&#x0a;&#x0a;Or use the Gesture Listener to receive data&#x0a;from your CV module via UDP on port 9090" 
+                       Foreground="White" 
+                       TextAlignment="Center"
+                       HorizontalAlignment="Center" 
+                       VerticalAlignment="Center"
+                       FontSize="14"/>
+        </Grid>
+    </Grid>
+</Window>
