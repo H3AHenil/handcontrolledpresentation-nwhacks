@@ -8,7 +8,13 @@ Maps finger position to screen coordinates using perspective-correct homography.
 import sys
 from pathlib import Path
 
+<<<<<<< HEAD
 # Add parent directory to path for local imports
+=======
+from server.receiver import PORT, LowLatencyReceiver
+
+# Add parent directory to path for apriltage import
+>>>>>>> afccd80a5dfe9c7b758a638df53372c2e997f404
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from server.receiver import frames_from_udp, create_udp_socket, PORT
@@ -237,14 +243,13 @@ Controls:
     window_name = "Finger Screen Tracker"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
-    sock = create_udp_socket(PORT)
-    stream_gen = frames_from_udp(
-        sock,
-        wide_angle_crop=False,
-        original_hfov_deg=160.0
-    )
+    receiver = LowLatencyReceiver(PORT, wide_angle_crop=False)
     try:
-        for frame, latency in stream_gen:
+        while True:
+            frame, latency = receiver.get_latest()
+
+            if frame is None:
+                continue
 
             frame = cv2.flip(frame, -1)
             # Detect AprilTags and update screen mappers
