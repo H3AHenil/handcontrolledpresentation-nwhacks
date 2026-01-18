@@ -2,238 +2,286 @@ import cv2
 import mediapipe as mp
 import time
 import math
-from collections import deque, Counter
+from collections import deque
 
 # ==========================================================
-# VIEW MODE
-#   - "FPV_BEHIND_HANDS": camera is first-person, behind hands
-#   - "SELFIE_WEBCAM": laptop webcam selfie/mirrored feel
+# SETTINGS (FPV behind-hands friendly)
 # ==========================================================
-VIEW_MODE = "FPV_BEHIND_HANDS"
-
-# If your camera feed is mirrored by the device/app, set this True.
-# (Most FPV/back cameras are NOT mirrored -> keep False.)
+VIEW_MODE = "FPV_BEHIND_HANDS"   # "SELFIE_WEBCAM"
 FORCE_MIRROR_INPUT = False
 
-if VIEW_MODE == "FPV_BEHIND_HANDS":
-    DISPLAY_FLIP = False
-    PROCESS_FLIP = False
-    INVERT_LEFT_RIGHT = False
-elif VIEW_MODE == "SELFIE_WEBCAM":
-    # Mirror for typical selfie UX (like many webcam demos)
-    DISPLAY_FLIP = True
-    PROCESS_FLIP = True
-    INVERT_LEFT_RIGHT = False
-else:
-    raise ValueError("Unknown VIEW_MODE")
-
-# If input is already mirrored by your camera pipeline, you can override:
-if FORCE_MIRROR_INPUT:
-    DISPLAY_FLIP = not DISPLAY_FLIP
-    PROCESS_FLIP = not PROCESS_FLIP
-    INVERT_LEFT_RIGHT = not INVERT_LEFT_RIGHT
+# In FPV behind-hands, MediaPipe handedness often appears flipped.
+INVERT_HANDEDNESS = True
 
 MAX_NUM_HANDS = 2
 
-# =========================
-# Gesture thresholds
-# =========================
-PINCH_THRESH = 0.23
-TWO_FINGER_PINCH_THRESH = 0.25
+# ==========================================================
+# DISCRETE EVENT LATCHING (reduces flicker / spam)
+# Pointer + Stretch + Thumb rotation update quickly.
+# Everything else fires once, then holds briefly.
+# ==========================================================
+PINCH_LATCH_S = 0.30
+CLAP_LATCH_S = 0.65
 
-ROTATE_ANGLE_THRESH_DEG = 22
-ROTATE_COOLDOWN_S = 0.6
+CLAP_COOLDOWN_S = 0.70
 
-SWIPE_SPEED_PX_S = 1300
-SWIPE_DIST_PX = 120
-SWIPE_WINDOW_S = 0.22
-SWIPE_COOLDOWN_S = 0.6
+# ==========================================================
+# PINCH (loose but stable)
+# ==========================================================
+PINCH_ON = 0.62
+PINCH_OFF = 0.80
 
-STABILITY_FRAMES = 3
+# ==========================================================
+# EXTENSION / CURL (3D heavy so FPV-robust)
+# ==========================================================
+EXT_MIN_PIP_ANGLE_DEG = 158.0
+FINGER_EXT_TIP_RATIO_3 = 0.90
+CURL_MAX_PIP_ANGLE_DEG = 152.0
+FINGER_CURLED_TIP_RATIO_3 = 0.84
 
-# =========================
-# MediaPipe setup
-# =========================
+# Pointer (continuous)
+POINTER_REQUIRE_ONLY_INDEX = True
+
+# ==========================================================
+# THUMBS-UP ROTATION (ONLY when strict thumbs-up)
+# ==========================================================
+THUMB_MIN_IP_ANGLE_DEG = 150.0
+THUMB_TIP_RATIO_3 = 0.95
+
+THUMBS_UP_MIN_VY = -0.70
+THUMBS_UP_MAX_VX = 0.55
+THUMBS_UP_MAX_VZ = 0.70
+
+THUMBS_ENTER_FRAMES = 3
+THUMBS_EXIT_FRAMES = 2
+THUMBS_LOG_INTERVAL_S = 0.25
+
+# ==========================================================
+# CLAP (discrete) with arming + last-seen fallback
+# ==========================================================
+CLAP_ARM_RATIO = 1.90
+CLAP_NEAR_RATIO = 0.78
+CLAP_TRIGGER_RATIO = 1.15
+CLAP_APPROACH_SPEED = 2.0
+LAST_SEEN_WINDOW_S = 0.30
+
+# ==========================================================
+# STRETCH (continuous): distance between two index tips (when both are Pointer)
+# ==========================================================
+STRETCH_REQUIRE_POINTERS = True
+
+# ==========================================================
+# Video flip behavior
+# ==========================================================
+if VIEW_MODE == "FPV_BEHIND_HANDS":
+    DISPLAY_FLIP = False
+    PROCESS_FLIP = False
+elif VIEW_MODE == "SELFIE_WEBCAM":
+    DISPLAY_FLIP = True
+    PROCESS_FLIP = True
+else:
+    raise ValueError("Unknown VIEW_MODE")
+
+if FORCE_MIRROR_INPUT:
+    DISPLAY_FLIP = not DISPLAY_FLIP
+    PROCESS_FLIP = not PROCESS_FLIP
+
+# ==========================================================
+# MediaPipe
+# ==========================================================
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
 mp_hands = mp.solutions.hands
 
-# =========================
-# Helpers
-# =========================
+
+# ----------------- helpers -----------------
 def dist2(a, b):
     return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def dist3(a, b):
+    return math.sqrt((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2)
+
 
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
-def invert_lr(direction: str) -> str:
-    if not INVERT_LEFT_RIGHT:
-        return direction
-    if direction == "Left":
-        return "Right"
-    if direction == "Right":
-        return "Left"
-    return direction
 
-def angle_deg(p1, p2):
-    return math.degrees(math.atan2(p2[1] - p1[1], p2[0] - p1[0]))
-
-def is_finger_extended(wrist, tip, pip):
-    d_tip = dist2(wrist, tip)
-    d_pip = dist2(wrist, pip)
-    return d_tip > d_pip * 1.10
-
-def handedness_label(handedness):
-    try:
-        return handedness.classification[0].label  # "Left" / "Right"
-    except Exception:
-        return "Unknown"
-
-def mode_of_last(dq):
-    if not dq:
-        return None
-    c = Counter(dq)
-    return c.most_common(1)[0][0]
-
-def mean_point(points):
+def mean_point2(points):
     x = sum(p[0] for p in points) / len(points)
     y = sum(p[1] for p in points) / len(points)
     return (int(x), int(y))
 
-# =========================
-# Gesture classification
-# =========================
-def classify_hand(pts, hand_scale):
+
+def mean_point3(points):
+    x = sum(p[0] for p in points) / len(points)
+    y = sum(p[1] for p in points) / len(points)
+    z = sum(p[2] for p in points) / len(points)
+    return (x, y, z)
+
+
+def angle_3pt_deg(a, b, c):
+    bax = (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+    bcx = (c[0] - b[0], c[1] - b[1], c[2] - b[2])
+    ba_len = math.sqrt(bax[0] ** 2 + bax[1] ** 2 + bax[2] ** 2) + 1e-9
+    bc_len = math.sqrt(bcx[0] ** 2 + bcx[1] ** 2 + bcx[2] ** 2) + 1e-9
+    dot = bax[0] * bcx[0] + bax[1] * bcx[1] + bax[2] * bcx[2]
+    cosang = clamp(dot / (ba_len * bc_len), -1.0, 1.0)
+    return math.degrees(math.acos(cosang))
+
+
+def update_hysteresis(active, value, on_thr, off_thr):
+    if not active:
+        return value <= on_thr
+    return not (value >= off_thr)
+
+
+def handedness_label(h):
+    try:
+        lbl = h.classification[0].label
+    except Exception:
+        lbl = "Unknown"
+    if INVERT_HANDEDNESS:
+        if lbl == "Left":
+            return "Right"
+        if lbl == "Right":
+            return "Left"
+    return lbl
+
+
+def yaw_pitch_from_thumb_vec(vx, vy, vz):
+    forward = max(1e-6, -vz)
+    yaw = math.degrees(math.atan2(vx, forward))
+    pitch = math.degrees(math.atan2(-vy, forward))
+    return yaw, pitch
+
+
+def latch(st, label, now, hold_s):
+    st["latched_label"] = label
+    st["latched_until"] = max(st["latched_until"], now + hold_s)
+
+
+# ----------------- feature extraction -----------------
+def extract(px, n3):
     WRIST = 0
-    TH_TIP, TH_IP, TH_MCP = 4, 3, 2
-    IX_TIP, IX_PIP, IX_MCP = 8, 6, 5
-    MD_TIP, MD_PIP, MD_MCP = 12, 10, 9
-    RG_TIP, RG_PIP = 16, 14
-    PK_TIP, PK_PIP, PK_MCP = 20, 18, 17
+    TH_MCP, TH_IP, TH_TIP = 2, 3, 4
+    IX_MCP, IX_PIP, IX_DIP, IX_TIP = 5, 6, 7, 8
+    MD_MCP, MD_PIP, MD_DIP, MD_TIP = 9, 10, 11, 12
+    RG_MCP, RG_PIP, RG_DIP, RG_TIP = 13, 14, 15, 16
+    PK_MCP, PK_PIP, PK_DIP, PK_TIP = 17, 18, 19, 20
 
-    wrist = pts[WRIST]
-    thumb_tip = pts[TH_TIP]
-    index_tip = pts[IX_TIP]
-    middle_tip = pts[MD_TIP]
+    hand_scale_3 = max(dist3(n3[IX_MCP], n3[PK_MCP]), 1e-3)
+    palm_center_3 = mean_point3([n3[WRIST], n3[IX_MCP], n3[MD_MCP], n3[PK_MCP]])
+    palm_center_px = mean_point2([px[WRIST], px[IX_MCP], px[MD_MCP], px[PK_MCP]])
 
-    index_ext  = is_finger_extended(wrist, pts[IX_TIP], pts[IX_PIP])
-    middle_ext = is_finger_extended(wrist, pts[MD_TIP], pts[MD_PIP])
-    ring_ext   = is_finger_extended(wrist, pts[RG_TIP], pts[RG_PIP])
-    pinky_ext  = is_finger_extended(wrist, pts[PK_TIP], pts[PK_PIP])
-    thumb_ext  = is_finger_extended(wrist, pts[TH_TIP], pts[TH_IP])
+    idx_ang = angle_3pt_deg(n3[IX_MCP], n3[IX_PIP], n3[IX_DIP])
+    mid_ang = angle_3pt_deg(n3[MD_MCP], n3[MD_PIP], n3[MD_DIP])
+    rng_ang = angle_3pt_deg(n3[RG_MCP], n3[RG_PIP], n3[RG_DIP])
+    pky_ang = angle_3pt_deg(n3[PK_MCP], n3[PK_PIP], n3[PK_DIP])
+    th_ang = angle_3pt_deg(n3[TH_MCP], n3[TH_IP], n3[TH_TIP])
 
-    pinch_d = dist2(thumb_tip, index_tip) / max(hand_scale, 1.0)
-    pinch = pinch_d < PINCH_THRESH
+    def tip_ratio_3(tip_i):
+        return dist3(n3[tip_i], palm_center_3) / (hand_scale_3 + 1e-9)
 
-    two_finger_pinch = (
-        (dist2(thumb_tip, index_tip) / max(hand_scale, 1.0) < TWO_FINGER_PINCH_THRESH) and
-        (dist2(thumb_tip, middle_tip) / max(hand_scale, 1.0) < TWO_FINGER_PINCH_THRESH)
-    )
+    idx_tip_r = tip_ratio_3(IX_TIP)
+    mid_tip_r = tip_ratio_3(MD_TIP)
+    rng_tip_r = tip_ratio_3(RG_TIP)
+    pky_tip_r = tip_ratio_3(PK_TIP)
+    th_tip_r = tip_ratio_3(TH_TIP)
 
-    extended_count = sum([index_ext, middle_ext, ring_ext, pinky_ext])
+    def is_ext(pip_ang, tip_r):
+        return (pip_ang >= EXT_MIN_PIP_ANGLE_DEG) and (tip_r >= FINGER_EXT_TIP_RATIO_3)
 
-    open_palm = (extended_count >= 4) and (dist2(pts[IX_MCP], pts[PK_MCP]) / max(hand_scale, 1.0) > 0.7)
+    def is_curled(pip_ang, tip_r):
+        return (pip_ang <= CURL_MAX_PIP_ANGLE_DEG) or (tip_r <= FINGER_CURLED_TIP_RATIO_3)
 
-    closed_fist = (extended_count == 0) and (dist2(pts[IX_TIP], wrist) / max(hand_scale, 1.0) < 2.3)
+    index_ext = is_ext(idx_ang, idx_tip_r)
+    middle_ext = is_ext(mid_ang, mid_tip_r)
+    ring_ext = is_ext(rng_ang, rng_tip_r)
+    pinky_ext = is_ext(pky_ang, pky_tip_r)
 
-    pointer = index_ext and (not middle_ext) and (not ring_ext) and (not pinky_ext) and (not pinch) and (not two_finger_pinch)
+    index_curled = is_curled(idx_ang, idx_tip_r)
+    middle_curled = is_curled(mid_ang, mid_tip_r)
+    ring_curled = is_curled(rng_ang, rng_tip_r)
+    pinky_curled = is_curled(pky_ang, pky_tip_r)
 
-    thumbs_up = False
-    thumbs_down = False
-    if thumb_ext and (extended_count == 0):
-        v = (thumb_tip[0] - pts[TH_MCP][0], thumb_tip[1] - pts[TH_MCP][1])
-        v_len = math.hypot(v[0], v[1]) + 1e-6
-        v_unit = (v[0] / v_len, v[1] / v_len)
+    # Thumb vector unit
+    tv = (n3[TH_TIP][0] - n3[TH_MCP][0], n3[TH_TIP][1] - n3[TH_MCP][1], n3[TH_TIP][2] - n3[TH_MCP][2])
+    tv_len = math.sqrt(tv[0] ** 2 + tv[1] ** 2 + tv[2] ** 2) + 1e-9
+    tvu = (tv[0] / tv_len, tv[1] / tv_len, tv[2] / tv_len)
 
-        # image coords: up is negative y
-        verticality = abs(v_unit[1])
-        if verticality > 0.70 and v_unit[1] < -0.70:
-            thumbs_up = True
-        elif verticality > 0.70 and v_unit[1] > 0.70:
-            thumbs_down = True
-
-    # "Rotate fist" = tilt in image plane when fist is closed
-    rotate_dir = None
-    rotate_angle = angle_deg(pts[IX_MCP], pts[PK_MCP])
-    if closed_fist:
-        if rotate_angle > ROTATE_ANGLE_THRESH_DEG:
-            rotate_dir = "Right"
-        elif rotate_angle < -ROTATE_ANGLE_THRESH_DEG:
-            rotate_dir = "Left"
-
-    if two_finger_pinch:
-        gesture = "Two-Finger Pinch"
-    elif pinch:
-        gesture = "Pinch"
-    elif thumbs_up:
-        gesture = "Thumbs Up"
-    elif thumbs_down:
-        gesture = "Thumbs Down"
-    elif closed_fist:
-        gesture = "Closed Fist"
-    elif open_palm:
-        gesture = "Open Palm"
-    elif pointer:
-        gesture = "Pointer"
-    else:
-        gesture = "Unknown"
-
-    # Palm center for more stable swipe tracking (wrist + knuckles)
-    palm_center = mean_point([pts[WRIST], pts[IX_MCP], pts[PK_MCP]])
+    thumb_strong = (th_ang >= THUMB_MIN_IP_ANGLE_DEG) and (th_tip_r >= THUMB_TIP_RATIO_3)
 
     return {
-        "gesture": gesture,
-        "pointer": pointer,
-        "pinch": pinch,
-        "two_finger_pinch": two_finger_pinch,
-        "closed_fist": closed_fist,
-        "open_palm": open_palm,
-        "thumbs_up": thumbs_up,
-        "thumbs_down": thumbs_down,
-        "rotate_dir": rotate_dir,
-        "rotate_angle": rotate_angle,
-        "index_tip": index_tip,
-        "wrist": wrist,
-        "palm_center": palm_center,
+        "hand_scale_3": hand_scale_3,
+        "palm_center_3": palm_center_3,
+        "palm_center_px": palm_center_px,
+
+        "index_tip_px": px[IX_TIP],
+        "index_tip_3": n3[IX_TIP],
+        "thumb_tip_3": n3[TH_TIP],
+
+        "index_ext": index_ext,
+        "middle_ext": middle_ext,
+        "ring_ext": ring_ext,
+        "pinky_ext": pinky_ext,
+
+        "index_curled": index_curled,
+        "middle_curled": middle_curled,
+        "ring_curled": ring_curled,
+        "pinky_curled": pinky_curled,
+
+        "thumb_vec_u": tvu,
+        "thumb_strong": thumb_strong,
     }
 
-# =========================
-# Main loop
-# =========================
+
 def main():
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("ERROR: Could not open webcam.")
         return
 
-    gesture_hist = {"Left": deque(maxlen=STABILITY_FRAMES),
-                    "Right": deque(maxlen=STABILITY_FRAMES),
-                    "Unknown": deque(maxlen=STABILITY_FRAMES)}
-    stable_gesture = {"Left": None, "Right": None, "Unknown": None}
+    state = {k: {
+        "latched_label": "Neutral",
+        "latched_until": 0.0,
 
-    swipe_track = {"Left": deque(), "Right": deque(), "Unknown": deque()}
-    swipe_last_time = {"Left": 0.0, "Right": 0.0, "Unknown": 0.0}
+        "pinch_active": False,
+        "pinch_prev": False,
 
-    rotate_last_time = {"Left": 0.0, "Right": 0.0, "Unknown": 0.0}
+        "thumbs_active": False,
+        "thumbs_enter": 0,
+        "thumbs_exit": 0,
+        "last_thumb_log": 0.0,
+    } for k in ["Left", "Right", "Unknown"]}
 
-    print(f"Running in VIEW_MODE={VIEW_MODE}, DISPLAY_FLIP={DISPLAY_FLIP}, PROCESS_FLIP={PROCESS_FLIP}, INVERT_LEFT_RIGHT={INVERT_LEFT_RIGHT}")
+    # Clap globals
+    clap_latched_until = 0.0
+    clap_cooldown_until = 0.0
+    clap_armed = True
+
+    # Last-seen for overlap dropout
+    last_seen = {
+        "Left": {"t": 0.0, "palm3": None, "scale3": None},
+        "Right": {"t": 0.0, "palm3": None, "scale3": None},
+    }
+
+    def last_valid(hand_key, now):
+        return (now - last_seen[hand_key]["t"]) <= LAST_SEEN_WINDOW_S and last_seen[hand_key]["palm3"] is not None
 
     with mp_hands.Hands(
         static_image_mode=False,
         max_num_hands=MAX_NUM_HANDS,
-        model_complexity=0,
+        model_complexity=1,
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5
     ) as hands:
 
         while cap.isOpened():
-            success, frame = cap.read()
-            if not success:
-                print("Ignoring empty camera frame.")
+            ok, frame = cap.read()
+            if not ok:
                 continue
 
-            # Optional flip for processing (depends on view mode)
             if PROCESS_FLIP:
                 frame = cv2.flip(frame, 1)
 
@@ -245,123 +293,196 @@ def main():
             results = hands.process(rgb)
 
             detected = []
-            overlay_lines = [f"Mode: {VIEW_MODE}"]
+            overlay = [f"Mode: {VIEW_MODE}"]
 
+            # ---------------- read hands ----------------
+            used_labels = set()
             if results.multi_hand_landmarks:
                 for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                    label = "Unknown"
+                    lbl = "Unknown"
                     if results.multi_handedness and i < len(results.multi_handedness):
-                        label = handedness_label(results.multi_handedness[i])
+                        lbl = handedness_label(results.multi_handedness[i])
 
-                    pts = []
+                    if lbl in used_labels:
+                        if "Left" not in used_labels:
+                            lbl = "Left"
+                        elif "Right" not in used_labels:
+                            lbl = "Right"
+                        else:
+                            lbl = "Unknown"
+                    used_labels.add(lbl)
+
+                    px, n3 = [], []
                     for lm in hand_landmarks.landmark:
-                        x_px = int(lm.x * w)
-                        y_px = int(lm.y * h)
-                        pts.append((x_px, y_px))
+                        px.append((int(lm.x * w), int(lm.y * h)))
+                        n3.append((lm.x, lm.y, lm.z))
 
-                    hand_scale = dist2(pts[5], pts[17])
-                    hand_scale = max(hand_scale, 60.0)
+                    feats = extract(px, n3)
+                    st = state[lbl]
 
-                    info = classify_hand(pts, hand_scale)
-                    info["label"] = label
-                    detected.append(info)
+                    # last-seen for clap
+                    if lbl in ("Left", "Right"):
+                        last_seen[lbl]["t"] = now
+                        last_seen[lbl]["palm3"] = feats["palm_center_3"]
+                        last_seen[lbl]["scale3"] = feats["hand_scale_3"]
 
+                    # Pointer (continuous)
+                    if POINTER_REQUIRE_ONLY_INDEX:
+                        pointer = feats["index_ext"] and (not feats["middle_ext"]) and (not feats["ring_ext"]) and (not feats["pinky_ext"])
+                    else:
+                        pointer = feats["index_ext"]
+
+                    # Thumbs-up rotation activation
+                    vx, vy, vz = feats["thumb_vec_u"]
+                    thumbs_up_dir = (vy <= THUMBS_UP_MIN_VY) and (abs(vx) <= THUMBS_UP_MAX_VX) and (abs(vz) <= THUMBS_UP_MAX_VZ)
+                    curled_count = sum([feats["index_curled"], feats["middle_curled"], feats["ring_curled"], feats["pinky_curled"]])
+                    thumbs_candidate = feats["thumb_strong"] and thumbs_up_dir and (curled_count >= 2)
+
+                    if thumbs_candidate:
+                        st["thumbs_enter"] = min(THUMBS_ENTER_FRAMES, st["thumbs_enter"] + 1)
+                        st["thumbs_exit"] = 0
+                    else:
+                        st["thumbs_exit"] = min(THUMBS_EXIT_FRAMES, st["thumbs_exit"] + 1)
+                        st["thumbs_enter"] = 0
+
+                    if (not st["thumbs_active"]) and st["thumbs_enter"] >= THUMBS_ENTER_FRAMES:
+                        st["thumbs_active"] = True
+                    elif st["thumbs_active"] and st["thumbs_exit"] >= THUMBS_EXIT_FRAMES:
+                        st["thumbs_active"] = False
+
+                    yaw_deg = pitch_deg = None
+                    if st["thumbs_active"]:
+                        yaw_deg, pitch_deg = yaw_pitch_from_thumb_vec(vx, vy, vz)
+                        if (now - st["last_thumb_log"]) >= THUMBS_LOG_INTERVAL_S:
+                            st["last_thumb_log"] = now
+                            print(f"[{time.strftime('%H:%M:%S')}] {lbl}: ThumbRot yaw={yaw_deg:+.1f} pitch={pitch_deg:+.1f}")
+
+                    # Pinch (disabled while thumb-rotation is active)
+                    thumb_index = dist3(feats["thumb_tip_3"], feats["index_tip_3"]) / feats["hand_scale_3"]
+                    if st["thumbs_active"]:
+                        st["pinch_active"] = False
+                    else:
+                        st["pinch_active"] = update_hysteresis(st["pinch_active"], thumb_index, PINCH_ON, PINCH_OFF)
+
+                    # Pinch latch on rising edge
+                    if (not st["pinch_prev"]) and st["pinch_active"]:
+                        latch(st, "Pinch", now, PINCH_LATCH_S)
+                        print(f"[{time.strftime('%H:%M:%S')}] {lbl}: Pinch")
+                    st["pinch_prev"] = st["pinch_active"]
+
+                    # Pointer should not show while pinching
+                    if st["pinch_active"]:
+                        pointer = False
+
+                    # draw
                     mp_drawing.draw_landmarks(
-                        frame,
-                        hand_landmarks,
-                        mp_hands.HAND_CONNECTIONS,
+                        frame, hand_landmarks, mp_hands.HAND_CONNECTIONS,
                         mp_drawing_styles.get_default_hand_landmarks_style(),
                         mp_drawing_styles.get_default_hand_connections_style()
                     )
 
-                    # Pointer "cursor"
-                    if info["pointer"] or info["pinch"] or info["two_finger_pinch"]:
-                        cv2.circle(frame, info["index_tip"], 10, (0, 255, 0), -1)
+                    if pointer or st["pinch_active"]:
+                        cv2.circle(frame, feats["index_tip_px"], 10, (0, 255, 0), -1)
 
-                    # Stabilize gesture label
-                    gesture_hist[label].append(info["gesture"])
-                    g_stable = mode_of_last(gesture_hist[label])
-                    if g_stable != stable_gesture[label]:
-                        stable_gesture[label] = g_stable
-                        print(f"[{time.strftime('%H:%M:%S')}] {label}: {g_stable}")
+                    detected.append({
+                        "label": lbl,
+                        "feats": feats,
+                        "pointer": pointer,
+                        "pinch": st["pinch_active"],
+                        "thumbrot": st["thumbs_active"],
+                        "yaw": yaw_deg,
+                        "pitch": pitch_deg
+                    })
 
-                    # SWIPE tracking using palm_center.x (more stable in FPV)
-                    swipe_track[label].append((now, info["palm_center"][0]))
-                    while swipe_track[label] and (now - swipe_track[label][0][0]) > SWIPE_WINDOW_S:
-                        swipe_track[label].popleft()
+            # ---------------- clap detection ----------------
+            clap_active = now < clap_latched_until
+            pair_ratio = None
 
-                    if (now - swipe_last_time[label]) > SWIPE_COOLDOWN_S and len(swipe_track[label]) >= 2:
-                        t0, x0 = swipe_track[label][0]
-                        t1, x1 = swipe_track[label][-1]
-                        dt = max(t1 - t0, 1e-6)
-                        dx = x1 - x0
-                        speed = dx / dt
+            def compute_pair_ratio():
+                # Current two hands preferred
+                if len(detected) == 2:
+                    p0 = detected[0]["feats"]["palm_center_3"]
+                    p1 = detected[1]["feats"]["palm_center_3"]
+                    s0 = detected[0]["feats"]["hand_scale_3"]
+                    s1 = detected[1]["feats"]["hand_scale_3"]
+                    avg = (s0 + s1) / 2.0
+                    return dist3(p0, p1) / (avg + 1e-9)
+                # Fallback to last-seen (overlap dropout)
+                if last_valid("Left", now) and last_valid("Right", now):
+                    p0 = last_seen["Left"]["palm3"]
+                    p1 = last_seen["Right"]["palm3"]
+                    avg = (last_seen["Left"]["scale3"] + last_seen["Right"]["scale3"]) / 2.0
+                    return dist3(p0, p1) / (avg + 1e-9)
+                return None
 
-                        # Only detect swipe if palm is open OR pointer is active (reduces false positives)
-                        if (abs(speed) > SWIPE_SPEED_PX_S) and (abs(dx) > SWIPE_DIST_PX) and (info["open_palm"] or info["pointer"]):
-                            swipe_dir = "Right" if speed > 0 else "Left"
-                            swipe_dir = invert_lr(swipe_dir)
-                            swipe_last_time[label] = now
-                            print(f"[{time.strftime('%H:%M:%S')}] {label}: Swipe {swipe_dir}")
+            pair_ratio = compute_pair_ratio()
 
-                    # ROTATE (discrete) with cooldown
-                    if info["rotate_dir"] is not None:
-                        if (now - rotate_last_time[label]) > ROTATE_COOLDOWN_S:
-                            rot_dir = invert_lr(info["rotate_dir"])
-                            rotate_last_time[label] = now
-                            print(f"[{time.strftime('%H:%M:%S')}] {label}: Rotate {rot_dir} (angle={info['rotate_angle']:.1f}°)")
+            # arm when far apart
+            if pair_ratio is not None and pair_ratio >= CLAP_ARM_RATIO:
+                clap_armed = True
 
-            # Two-hand stretch (continuous)
-            stretch_text = None
-            if len(detected) == 2 and detected[0]["pointer"] and detected[1]["pointer"]:
-                p0 = detected[0]["index_tip"]
-                p1 = detected[1]["index_tip"]
-                d = dist2(p0, p1)
+            # trigger once when armed + near
+            if (not clap_active) and clap_armed and (now >= clap_cooldown_until) and (pair_ratio is not None):
+                if pair_ratio <= CLAP_NEAR_RATIO:
+                    clap_latched_until = now + CLAP_LATCH_S
+                    clap_cooldown_until = now + CLAP_COOLDOWN_S
+                    clap_armed = False
+                    clap_active = True
+                    print(f"[{time.strftime('%H:%M:%S')}] GLOBAL: Clap")
+
+            if clap_active:
+                overlay.append("GLOBAL: Clap")
+
+            # ---------------- stretch (continuous) ----------------
+            if len(detected) == 2 and STRETCH_REQUIRE_POINTERS and detected[0]["pointer"] and detected[1]["pointer"]:
+                p0 = detected[0]["feats"]["index_tip_px"]
+                p1 = detected[1]["feats"]["index_tip_px"]
+                dpx = dist2(p0, p1)
                 diag = math.hypot(w, h)
-                stretch_norm = clamp(d / diag, 0.0, 1.0)
-                stretch_text = f"Stretch: {d:.0f}px ({stretch_norm:.3f})"
+                stretch_norm = clamp(dpx / diag, 0.0, 1.0)
                 cv2.line(frame, p0, p1, (255, 255, 255), 2)
+                overlay.append(f"Stretch: {dpx:.0f}px ({stretch_norm:.3f})")
 
-            # Overlay text
+            # ---------------- overlay per hand ----------------
             if detected:
-                for info in detected:
-                    label = info["label"]
-                    g = stable_gesture[label] if stable_gesture[label] else info["gesture"]
-                    line = f"{label}: {g}"
-                    if info["pointer"]:
-                        x, y = info["index_tip"]
-                        line += f" | Ptr=({x},{y})"
-                    overlay_lines.append(line)
+                for d in detected:
+                    lbl = d["label"]
+                    st = state[lbl]
+
+                    if d["thumbrot"]:
+                        disp = "ThumbRot"
+                    elif now < st["latched_until"]:
+                        disp = st["latched_label"]
+                    elif d["pointer"]:
+                        disp = "Pointer"
+                    else:
+                        disp = "Neutral"
+
+                    if d["thumbrot"] and d["yaw"] is not None and d["pitch"] is not None:
+                        overlay.append(f"{lbl}: {disp}  yaw={d['yaw']:+.1f}  pitch={d['pitch']:+.1f}")
+                    else:
+                        overlay.append(f"{lbl}: {disp}")
+
+                    if d["pointer"]:
+                        ix, iy = d["feats"]["index_tip_px"]
+                        overlay.append(f"  Ptr: ({ix},{iy})")
             else:
-                overlay_lines.append("No hands detected")
+                overlay.append("No hands detected")
 
-            if stretch_text:
-                overlay_lines.append(stretch_text)
-
-            # Flip ONLY for display if desired (usually false in FPV)
+            # ---------------- render overlay box ----------------
             display_frame = cv2.flip(frame, 1) if DISPLAY_FLIP else frame
-
-            # Draw overlay box
             x0, y0 = 12, 22
             line_h = 22
-            max_chars = max(len(s) for s in overlay_lines)
-            box_px_w = min(16 + max_chars * 9, display_frame.shape[1] - 24)
-            box_px_h = 12 + line_h * len(overlay_lines)
+            max_chars = max(len(s) for s in overlay)
+            box_w = min(16 + max_chars * 9, display_frame.shape[1] - 24)
+            box_h = 12 + line_h * len(overlay)
 
-            cv2.rectangle(display_frame, (8, 8), (8 + box_px_w, 8 + box_px_h), (0, 0, 0), -1)
-            for i, s in enumerate(overlay_lines):
-                cv2.putText(
-                    display_frame,
-                    s,
-                    (x0, y0 + i * line_h),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (255, 255, 255),
-                    2,
-                    cv2.LINE_AA
-                )
+            cv2.rectangle(display_frame, (8, 8), (8 + box_w, 8 + box_h), (0, 0, 0), -1)
+            for i, s in enumerate(overlay):
+                cv2.putText(display_frame, s, (x0, y0 + i * line_h),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
 
-            cv2.imshow("MediaPipe Hands - Gestures", display_frame)
+            cv2.imshow("Gestures: Pointer / Pinch / Stretch / ThumbRot / Clap", display_frame)
 
             key = cv2.waitKey(1) & 0xFF
             if key == 27 or key == ord('q'):
@@ -369,6 +490,7 @@ def main():
 
     cap.release()
     cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()
