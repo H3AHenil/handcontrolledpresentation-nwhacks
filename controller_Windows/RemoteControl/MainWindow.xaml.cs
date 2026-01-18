@@ -9,6 +9,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Navigation;
 using System.Windows.Shapes;
+using TestOnRemoteControl.GestureControl;
 
 namespace TestOnRemoteControl;
 
@@ -30,9 +31,17 @@ public partial class MainWindow : Window
     // Wheel accumulator ("reservoir")
     private double _accumulatedScrollDelta = 0;
 
-
     private const int RemoteControlPort = 8080;
     private readonly UdpRemoteCommandListener _listener = new(RemoteControlPort);
+    
+    // Gesture control components
+    private const int GestureControlPort = 9090;
+    private GestureController? _gestureController;
+    private GestureUdpReceiver? _gestureReceiver;
+    
+    // AprilTag overlay
+    private AprilTagOverlay? _aprilTagOverlay;
+    private bool _aprilTagsVisible;
 
     public MainWindow()
     {
@@ -40,8 +49,262 @@ public partial class MainWindow : Window
         InitializeComponent();
 
         Loaded += (_, _) => _listener.Start();
-        Closed += async (_, _) => await _listener.StopAsync();
+        Closed += OnWindowClosed;
     }
+    
+    private async void OnWindowClosed(object? sender, EventArgs e)
+    {
+        await _listener.StopAsync();
+        
+        if (_gestureReceiver != null)
+        {
+            await _gestureReceiver.StopAsync();
+            _gestureReceiver.Dispose();
+        }
+        
+        _aprilTagOverlay?.Close();
+        _gestureController?.Dispose();
+    }
+    
+    private void Log(string message)
+    {
+        var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
+        ActivityLog.Text = $"[{timestamp}] {message}\n" + ActivityLog.Text;
+        
+        // Keep log size reasonable
+        if (ActivityLog.Text.Length > 3000)
+        {
+            ActivityLog.Text = ActivityLog.Text.Substring(0, 2000);
+        }
+    }
+    
+    #region Gesture Control
+    
+    private void OnStartGestureListener(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            // Create controller if not exists
+            _gestureController ??= new GestureController(new GestureController.ControllerConfiguration
+            {
+                ZoomSensitivity = 150.0f,
+                ScrollSensitivity = 80.0f,
+                MovementSmoothing = 0.2f
+            });
+            
+            _gestureController.ModeChanged += OnGestureModeChanged;
+            _gestureController.TargetScreenChanged += OnTargetScreenChanged;
+            
+            // Create and start receiver with screen filter
+            _gestureReceiver = new GestureUdpReceiver(GestureControlPort, _gestureController);
+            _gestureReceiver.ScreenIndexFilter = _gestureController.TargetScreenIndex; // Filter to only accept gestures for this screen
+            _gestureReceiver.GestureReceived += OnGestureReceived;
+            _gestureReceiver.GestureFiltered += OnGestureFiltered;
+            _gestureReceiver.ErrorOccurred += OnGestureError;
+            _gestureReceiver.Start();
+            
+            StartGestureListenerButton.IsEnabled = false;
+            StopGestureListenerButton.IsEnabled = true;
+            
+            StatusLabel.Text = $"Listening on port {GestureControlPort}";
+            StatusLabel.Foreground = new SolidColorBrush(Colors.LimeGreen);
+            
+            UpdateTargetScreenLabel();
+            
+            Log($"Gesture listener started on port {GestureControlPort}, filtering for screen {_gestureController.TargetScreenIndex}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to start gesture listener: {ex.Message}", "Error", 
+                MessageBoxButton.OK, MessageBoxImage.Error);
+            Log($"Error: {ex.Message}");
+        }
+    }
+    
+    private async void OnStopGestureListener(object sender, RoutedEventArgs e)
+    {
+        if (_gestureReceiver != null)
+        {
+            _gestureReceiver.GestureReceived -= OnGestureReceived;
+            _gestureReceiver.GestureFiltered -= OnGestureFiltered;
+            _gestureReceiver.ErrorOccurred -= OnGestureError;
+            await _gestureReceiver.StopAsync();
+            _gestureReceiver.Dispose();
+            _gestureReceiver = null;
+        }
+        
+        if (_gestureController != null)
+        {
+            _gestureController.ModeChanged -= OnGestureModeChanged;
+            _gestureController.TargetScreenChanged -= OnTargetScreenChanged;
+        }
+        
+        StartGestureListenerButton.IsEnabled = true;
+        StopGestureListenerButton.IsEnabled = false;
+        
+        StatusLabel.Text = "Idle";
+        StatusLabel.Foreground = new SolidColorBrush(Color.FromRgb(0x4C, 0xAF, 0x50));
+        
+        Log("Gesture listener stopped");
+    }
+    
+    private void OnOpenDemoWindow(object sender, RoutedEventArgs e)
+    {
+        var demoWindow = new GestureControlDemoWindow();
+        demoWindow.Show();
+        Log("Opened Gesture Control Demo window");
+    }
+    
+    private void OnSelectScreen(object sender, RoutedEventArgs e)
+    {
+        int currentScreen = _gestureController?.TargetScreenIndex ?? 0;
+        int selectedScreen = ScreenSelectorWindow.ShowDialog(currentScreen, this);
+        
+        if (selectedScreen >= 0)
+        {
+            // Ensure controller exists
+            _gestureController ??= new GestureController();
+            _gestureController.TargetScreenIndex = selectedScreen;
+            
+            UpdateTargetScreenLabel();
+            Log($"Target screen changed to: Screen {selectedScreen + 1}");
+        }
+    }
+    
+    private void UpdateTargetScreenLabel()
+    {
+        int screenIndex = _gestureController?.TargetScreenIndex ?? 0;
+        var screen = ScreenManager.GetScreen(screenIndex);
+        
+        if (screen != null)
+        {
+            TargetScreenLabel.Text = $"Screen {screenIndex + 1}{(screen.IsPrimary ? " [Primary]" : "")}";
+        }
+        else
+        {
+            TargetScreenLabel.Text = $"Screen {screenIndex + 1}";
+        }
+    }
+    
+    private void OnGestureModeChanged(object? sender, GestureModeChangedEventArgs e)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            GestureModeLabel.Text = e.NewMode == GestureMode.LaserPointer ? "Laser Pointer" : "Cursor";
+            GestureModeLabel.Foreground = e.NewMode == GestureMode.LaserPointer 
+                ? new SolidColorBrush(Colors.Red) 
+                : new SolidColorBrush(Color.FromRgb(0x21, 0x96, 0xF3));
+            Log($"Mode changed to: {e.NewMode}");
+        });
+    }
+    
+    private void OnTargetScreenChanged(object? sender, ScreenChangedEventArgs e)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            UpdateTargetScreenLabel();
+            Log($"Target screen changed to: Screen {e.NewScreenIndex + 1}");
+        });
+    }
+    
+    private void OnGestureReceived(object? sender, GestureData data)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            // Only log some gestures to avoid flooding
+            if (data.Type != GestureType.Pointer || DateTime.Now.Millisecond % 500 < 50)
+            {
+                Log($"Gesture: {data.Type} @ ({data.NormalizedX:F2}, {data.NormalizedY:F2}) screen={data.ScreenIndex}");
+            }
+        });
+    }
+    
+    private void OnGestureError(object? sender, Exception ex)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            Log($"Receiver error: {ex.Message}");
+        });
+    }
+    
+    private void OnGestureFiltered(object? sender, GestureData data)
+    {
+        // Optionally log filtered gestures (uncomment for debugging)
+        // Dispatcher.BeginInvoke(() =>
+        // {
+        //     Log($"Filtered: {data.Type} screen={data.ScreenIndex} device={data.DeviceId}");
+        // });
+    }
+    
+    private void OnToggleAprilTags(object sender, RoutedEventArgs e)
+    {
+        if (_aprilTagsVisible)
+        {
+            // Hide AprilTags
+            _aprilTagOverlay?.Hide();
+            _aprilTagsVisible = false;
+            AprilTagButton.Content = "Show AprilTags";
+            AprilTagStatusLabel.Text = "Off";
+            AprilTagStatusLabel.Foreground = new SolidColorBrush(Colors.Gray);
+            Log("AprilTags hidden");
+        }
+        else
+        {
+            // Show AprilTags
+            int targetScreen = _gestureController?.TargetScreenIndex ?? 0;
+            
+            if (_aprilTagOverlay == null)
+            {
+                _aprilTagOverlay = new AprilTagOverlay(targetScreen);
+            }
+            else
+            {
+                _aprilTagOverlay.SetTargetScreen(targetScreen);
+            }
+            
+            _aprilTagOverlay.Show();
+            _aprilTagsVisible = true;
+            AprilTagButton.Content = "Hide AprilTags";
+            AprilTagStatusLabel.Text = $"Screen {targetScreen + 1}";
+            AprilTagStatusLabel.Foreground = new SolidColorBrush(Colors.LimeGreen);
+            Log($"AprilTags shown on Screen {targetScreen + 1}");
+        }
+    }
+    
+    private async void OnTestLaserPointer(object sender, RoutedEventArgs e)
+    {
+        // Ensure controller exists
+        _gestureController ??= new GestureController();
+        
+        // Toggle to laser mode
+        if (_gestureController.CurrentMode != GestureMode.LaserPointer)
+        {
+            _gestureController.SetMode(GestureMode.LaserPointer);
+            LaserTestButton.Content = "Stop Laser Test";
+            Log("Laser pointer mode enabled - move to test");
+            
+            // Animate the laser pointer in a circle
+            int targetScreen = _gestureController.TargetScreenIndex;
+            
+            for (int i = 0; i < 100 && _gestureController.CurrentMode == GestureMode.LaserPointer; i++)
+            {
+                double angle = i * 0.1;
+                float x = 0.5f + 0.2f * (float)Math.Cos(angle);
+                float y = 0.5f + 0.2f * (float)Math.Sin(angle);
+                
+                _gestureController.UpdateFingerPosition(x, y, 1, targetScreen);
+                await System.Threading.Tasks.Task.Delay(30);
+            }
+        }
+        else
+        {
+            _gestureController.SetMode(GestureMode.Cursor);
+            LaserTestButton.Content = "Test Laser Pointer";
+            Log("Laser pointer mode disabled");
+        }
+    }
+    
+    #endregion
 
 
     private void OnManipulationDelta(object sender, ManipulationDeltaEventArgs e)
