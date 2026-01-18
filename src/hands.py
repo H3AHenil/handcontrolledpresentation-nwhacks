@@ -4,33 +4,27 @@ import time
 import math
 from collections import deque
 
-# Settings (FPV behind-hands friendly)
 VIEW_MODE = "FPV_BEHIND_HANDS"   # "SELFIE_WEBCAM"
 FORCE_MIRROR_INPUT = False
 INVERT_HANDEDNESS = True
 MAX_NUM_HANDS = 2
 
-# Discrete event latching
 PINCH_LATCH_S = 0.30
 CLAP_LATCH_S = 0.65
 TWO_FINGER_SWIPE_LATCH_S = 0.45
 CLAP_COOLDOWN_S = 0.70
 
-# Pinch hysteresis + held logging
 PINCH_ON = 0.62
 PINCH_OFF = 0.80
 PINCH_STILL_LOG_INTERVAL_S = 0.35
 
-# Extension / curl heuristics (FPV-robust)
 EXT_MIN_PIP_ANGLE_DEG = 158.0
 FINGER_EXT_TIP_RATIO_3 = 0.90
 CURL_MAX_PIP_ANGLE_DEG = 152.0
 FINGER_CURLED_TIP_RATIO_3 = 0.84
 
-# Pointer (continuous)
 POINTER_REQUIRE_ONLY_INDEX = True
 
-# Thumb rotation (deliberate thresholds)
 THUMB_MIN_IP_ANGLE_DEG = 162.0
 THUMB_TIP_RATIO_3 = 1.10
 THUMBS_UP_MIN_VY = -0.88
@@ -42,14 +36,12 @@ THUMBS_LOG_INTERVAL_S = 0.25
 THUMBS_REQUIRE_CURLED_FINGERS = 3
 THUMBS_BLOCK_IF_POINTER = True
 
-# Clap detection (with last-seen fallback)
 CLAP_ARM_RATIO = 1.90
 CLAP_NEAR_RATIO = 0.78
 LAST_SEEN_WINDOW_S = 0.30
 CLAP_INTENT_RATIO = 1.35
 CLAP_INTENT_APPROACH = 1.4
 
-# Two-finger swipe (more generous)
 TFS_WINDOW_S = 0.30
 TFS_MIN_PEAK_SPEED_PX_S = 900
 TFS_MIN_PEAK_DIST_PX = 90
@@ -60,10 +52,8 @@ TFS_MIN_ANGLE_SPEED_DEG_S = 80.0
 TFS_STRONG_DIST_PX = 180
 TFS_STRONG_SPEED_PX_S = 1600
 
-# Stretch (continuous): distance between two index tips (when both are Pointer)
 STRETCH_REQUIRE_POINTERS = True
 
-# Video flip behavior
 if VIEW_MODE == "FPV_BEHIND_HANDS":
     DISPLAY_FLIP = False
     PROCESS_FLIP = False
@@ -265,6 +255,10 @@ def main():
         "Left": {"t": 0.0, "palm3": None, "scale3": None},
         "Right": {"t": 0.0, "palm3": None, "scale3": None},
     }
+
+    stretch_prev_dpx = None
+    stretch_prev_t = None
+    stretch_cumulative_px = 0.0
 
     def last_valid(hand_key, now):
         return (now - last_seen[hand_key]["t"]) <= LAST_SEEN_WINDOW_S and last_seen[hand_key]["palm3"] is not None
@@ -502,14 +496,38 @@ def main():
                         st["tfs_cooldown_until"] = now + TFS_COOLDOWN_S
                         st["tfs_track"].clear()
 
-            if len(detected) == 2 and STRETCH_REQUIRE_POINTERS and detected[0]["pointer"] and detected[1]["pointer"]:
+            stretch_active = (
+                len(detected) == 2 and
+                STRETCH_REQUIRE_POINTERS and
+                detected[0]["pointer"] and
+                detected[1]["pointer"]
+            )
+
+            if stretch_active:
                 p0 = detected[0]["feats"]["index_tip_px"]
                 p1 = detected[1]["feats"]["index_tip_px"]
                 dpx = dist2(p0, p1)
-                diag = math.hypot(w, h)
-                stretch_norm = clamp(dpx / diag, 0.0, 1.0)
+
+                if stretch_prev_dpx is None:
+                    stretch_prev_dpx = dpx
+                    stretch_prev_t = now
+                    stretch_delta_px = 0.0
+                    stretch_delta_per_s = 0.0
+                else:
+                    dt = max(now - (stretch_prev_t or now), 1e-6)
+                    stretch_delta_px = dpx - stretch_prev_dpx
+                    stretch_delta_per_s = stretch_delta_px / dt
+                    stretch_prev_dpx = dpx
+                    stretch_prev_t = now
+                    stretch_cumulative_px += stretch_delta_px
+
                 cv2.line(frame, p0, p1, (255, 255, 255), 2)
-                overlay.append(f"Stretch: {dpx:.0f}px ({stretch_norm:.3f})")
+                overlay.append(f"Stretch Δ: {stretch_delta_px:+.1f}px  ({stretch_delta_per_s:+.0f}px/s)")
+                overlay.append(f"Stretch Σ: {stretch_cumulative_px:+.1f}px")
+            else:
+                stretch_prev_dpx = None
+                stretch_prev_t = None
+                stretch_cumulative_px = 0.0
 
             if detected:
                 for d in detected:
@@ -552,7 +570,7 @@ def main():
                 cv2.putText(display_frame, s, (x0, y0 + i * line_h),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
 
-            cv2.imshow("Gestures: Pointer / Pinch / TwoFingerSwipe / Stretch / ThumbRot / Clap", display_frame)
+            cv2.imshow("Gestures: Pointer / Pinch / TwoFingerSwipe / StretchDelta / ThumbRot / Clap", display_frame)
 
             key = cv2.waitKey(1) & 0xFF
             if key == 27 or key == ord('q'):
