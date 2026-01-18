@@ -1,13 +1,13 @@
 """
-Generate printable AprilTag images.
+Generate printable AprilTag images (tag16h5 family).
 
-Supports the full tag36h11 family (587 tags, IDs 0-586).
+30 tags available (IDs 0-29), supports up to 7 screens.
 
-Default corner tags:
-- ID 0: Top-left corner
-- ID 1: Top-right corner
-- ID 2: Bottom-right corner
-- ID 3: Bottom-left corner
+Corner tag assignment:
+- ID 0: Top-left
+- ID 1: Top-right
+- ID 2: Bottom-right
+- ID 3: Bottom-left
 """
 
 from pathlib import Path
@@ -15,27 +15,27 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-# AprilTag dictionary for tag36h11
-APRILTAG_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
+# tag16h5: 30 tags (IDs 0-29), max 7 screens
+APRILTAG_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_16h5)
+MAX_TAG_ID = 29
+MAX_SCREENS = 7
 
 
-def generate_apriltag_36h11(tag_id: int, size: int = 200) -> np.ndarray:
+def generate_apriltag(tag_id: int, size: int = 200) -> np.ndarray:
     """
-    Generate a tag36h11 AprilTag image.
+    Generate a tag16h5 AprilTag image.
     
     Args:
-        tag_id: Tag ID (0-586 for tag36h11)
+        tag_id: Tag ID (0-29)
         size: Output image size in pixels
         
     Returns:
         Grayscale image of the tag
     """
-    if not 0 <= tag_id <= 586:
-        raise ValueError(f"Tag ID must be 0-586 for tag36h11, got {tag_id}")
+    if not 0 <= tag_id <= MAX_TAG_ID:
+        raise ValueError(f"Tag ID must be 0-{MAX_TAG_ID}, got {tag_id}")
     
-    # Generate using OpenCV's aruco module
-    tag_img = cv2.aruco.generateImageMarker(APRILTAG_DICT, tag_id, size)
-    return tag_img
+    return cv2.aruco.generateImageMarker(APRILTAG_DICT, tag_id, size)
 
 
 def generate_single_tag(
@@ -48,7 +48,7 @@ def generate_single_tag(
     Generate a single AprilTag and save to file.
     
     Args:
-        tag_id: Tag ID (0-586)
+        tag_id: Tag ID (0-29)
         output_path: Where to save the PNG
         size: Tag size in pixels (before margin)
         label: Optional label text below the tag
@@ -56,7 +56,7 @@ def generate_single_tag(
     Returns:
         Path to the saved file
     """
-    img = generate_apriltag_36h11(tag_id, size)
+    img = generate_apriltag(tag_id, size)
     
     # Add white margin for easier cutting
     margin = 50
@@ -91,7 +91,7 @@ def generate_tags(
     Generate multiple AprilTags and save to files.
     
     Args:
-        tag_ids: List of tag IDs to generate
+        tag_ids: List of tag IDs to generate (0-29)
         output_dir: Directory to save tags
         size: Tag size in pixels
         labels: Optional dict mapping tag_id -> label text
@@ -163,11 +163,14 @@ def generate_multiscreen_tags(
       etc.
     
     Args:
-        num_screens: Number of screens/monitors
+        num_screens: Number of screens/monitors (max 7)
         output_dir: Directory to save tags
         size: Tag size in pixels
         screen_names: Optional names for screens (e.g., ["Left", "Right"])
     """
+    if num_screens > MAX_SCREENS:
+        raise ValueError(f"Maximum {MAX_SCREENS} screens supported (30 tags / 4 per screen)")
+    
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
@@ -210,38 +213,71 @@ def generate_multiscreen_tags(
         print(f"\nCombined all screens: {combined_path}")
 
 
+def prompt_for_screens() -> tuple[int, list[str]]:
+    """Interactively ask user for number of screens and their names."""
+    print("=" * 50)
+    print("AprilTag Generator (tag16h5)")
+    print("=" * 50)
+    print(f"\nEach screen requires 4 AprilTags (one per corner).")
+    print(f"Maximum supported: {MAX_SCREENS} screens (30 tags / 4 per screen)\n")
+    
+    while True:
+        try:
+            num_screens = int(input("How many screens do you want to set up? "))
+            if num_screens < 1:
+                print("Please enter at least 1 screen.")
+                continue
+            if num_screens > MAX_SCREENS:
+                print(f"Maximum {MAX_SCREENS} screens supported.")
+                continue
+            break
+        except ValueError:
+            print("Please enter a valid number.")
+    
+    print(f"\nYou can optionally name each screen (press Enter to skip):")
+    names = []
+    for i in range(num_screens):
+        default_name = f"Screen {i}"
+        name = input(f"  Screen {i} name [{default_name}]: ").strip()
+        names.append(name if name else default_name)
+    
+    return num_screens, names
+
+
 def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description="Generate AprilTag markers (tag36h11 family)",
+        description="Generate AprilTag markers (tag16h5 family)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Generate default corner tags (IDs 0-3) for single screen
+  # Interactive mode - prompts for number of screens
   python generate_tags.py
   
-  # Generate tags for 2 screens (IDs 0-7)
+  # Generate tags for 2 screens
   python generate_tags.py --screens 2
   
   # Generate tags for 3 screens with names
   python generate_tags.py --screens 3 --names Left Center Right
   
   # Generate specific tag IDs
-  python generate_tags.py --ids 10 20 30
+  python generate_tags.py --ids 0 4 8
   
   # Generate a range of tags
-  python generate_tags.py --range 0 10
+  python generate_tags.py --range 0 12
   
   # Custom output directory and size
-  python generate_tags.py --ids 5 6 7 --output my_tags --size 400
+  python generate_tags.py --screens 2 --output my_tags --size 400
+
+Tag16h5: 30 tags (IDs 0-29), supports up to 7 screens
         """,
     )
     parser.add_argument(
         "--ids",
         type=int,
         nargs="+",
-        help="Specific tag IDs to generate (0-586)",
+        help="Specific tag IDs to generate (0-29)",
     )
     parser.add_argument(
         "--range",
@@ -254,7 +290,7 @@ Examples:
         "--screens",
         type=int,
         metavar="N",
-        help="Generate tags for N screens (4 tags each)",
+        help=f"Generate tags for N screens (4 tags each, max {MAX_SCREENS})",
     )
     parser.add_argument(
         "--names",
@@ -277,13 +313,8 @@ Examples:
     args = parser.parse_args()
     
     if args.screens:
-        # Generate multi-screen tags
-        generate_multiscreen_tags(
-            args.screens,
-            args.output,
-            args.size,
-            args.names,
-        )
+        # Generate multi-screen tags (CLI mode)
+        generate_multiscreen_tags(args.screens, args.output, args.size, args.names)
         print(f"\nDone! Each screen needs 4 tags at its corners.")
         print("Tag IDs per screen:")
         for i in range(args.screens):
@@ -296,10 +327,25 @@ Examples:
         start, end = args.range
         generate_tags(list(range(start, end)), args.output, args.size)
     else:
-        # Default: generate corner tags for single screen
-        generate_corner_tags(args.output, args.size)
-        print("\nDone! Print 'all_tags_printable.png' and cut out the individual tags.")
-        print("Place them at the corresponding corners of your monitor.")
+        # Interactive mode
+        num_screens, names = prompt_for_screens()
+        
+        print(f"\nGenerating tags for {num_screens} screen(s)...\n")
+        generate_multiscreen_tags(num_screens, args.output, args.size, names)
+        
+        print("\n" + "=" * 50)
+        print("SETUP INSTRUCTIONS")
+        print("=" * 50)
+        print(f"\n1. Print the tag sheets from: {args.output}/")
+        print("2. Cut out individual tags")
+        print("3. Place 4 tags at each screen's corners:\n")
+        
+        for i in range(num_screens):
+            base_id = i * 4
+            print(f"   {names[i]}:")
+            print(f"     Top-Left: ID {base_id}    Top-Right: ID {base_id + 1}")
+            print(f"     Bottom-Left: ID {base_id + 3}    Bottom-Right: ID {base_id + 2}")
+            print()
 
 
 if __name__ == "__main__":

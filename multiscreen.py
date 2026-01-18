@@ -1,8 +1,8 @@
 """
-Multi-screen AprilTag registration system.
+Multi-screen AprilTag registration system (tag16h5).
 
 Each screen has 4 AprilTags at its corners with unique IDs.
-The system detects which screen a point is on and maps to that screen's coordinates.
+Maximum 7 screens supported (30 tags / 4 per screen).
 
 Example setup with 2 monitors:
     Screen 0 (left):  Tags 0, 1, 2, 3
@@ -36,89 +36,35 @@ class MultiScreenConfig:
     screens: list[ScreenRegion] = field(default_factory=list)
 
     @classmethod
-    def dual_horizontal(
-        cls,
-        width: int = 1920,
-        height: int = 1080,
-    ) -> "MultiScreenConfig":
+    def dual_horizontal(cls, width: int = 1920, height: int = 1080) -> "MultiScreenConfig":
         """Create config for 2 side-by-side monitors."""
         return cls(screens=[
-            ScreenRegion(
-                name="Left",
-                width=width,
-                height=height,
-                tag_ids=(0, 1, 2, 3),
-                offset_x=0,
-                offset_y=0,
-            ),
-            ScreenRegion(
-                name="Right",
-                width=width,
-                height=height,
-                tag_ids=(4, 5, 6, 7),
-                offset_x=width,  # Right screen starts where left ends
-                offset_y=0,
-            ),
+            ScreenRegion(name="Left", width=width, height=height,
+                        tag_ids=(0, 1, 2, 3), offset_x=0, offset_y=0),
+            ScreenRegion(name="Right", width=width, height=height,
+                        tag_ids=(4, 5, 6, 7), offset_x=width, offset_y=0),
         ])
 
     @classmethod
-    def dual_vertical(
-        cls,
-        width: int = 1920,
-        height: int = 1080,
-    ) -> "MultiScreenConfig":
+    def dual_vertical(cls, width: int = 1920, height: int = 1080) -> "MultiScreenConfig":
         """Create config for 2 stacked monitors."""
         return cls(screens=[
-            ScreenRegion(
-                name="Top",
-                width=width,
-                height=height,
-                tag_ids=(0, 1, 2, 3),
-                offset_x=0,
-                offset_y=0,
-            ),
-            ScreenRegion(
-                name="Bottom",
-                width=width,
-                height=height,
-                tag_ids=(4, 5, 6, 7),
-                offset_x=0,
-                offset_y=height,
-            ),
+            ScreenRegion(name="Top", width=width, height=height,
+                        tag_ids=(0, 1, 2, 3), offset_x=0, offset_y=0),
+            ScreenRegion(name="Bottom", width=width, height=height,
+                        tag_ids=(4, 5, 6, 7), offset_x=0, offset_y=height),
         ])
 
     @classmethod
-    def triple_horizontal(
-        cls,
-        width: int = 1920,
-        height: int = 1080,
-    ) -> "MultiScreenConfig":
+    def triple_horizontal(cls, width: int = 1920, height: int = 1080) -> "MultiScreenConfig":
         """Create config for 3 side-by-side monitors."""
         return cls(screens=[
-            ScreenRegion(
-                name="Left",
-                width=width,
-                height=height,
-                tag_ids=(0, 1, 2, 3),
-                offset_x=0,
-                offset_y=0,
-            ),
-            ScreenRegion(
-                name="Center",
-                width=width,
-                height=height,
-                tag_ids=(4, 5, 6, 7),
-                offset_x=width,
-                offset_y=0,
-            ),
-            ScreenRegion(
-                name="Right",
-                width=width,
-                height=height,
-                tag_ids=(8, 9, 10, 11),
-                offset_x=width * 2,
-                offset_y=0,
-            ),
+            ScreenRegion(name="Left", width=width, height=height,
+                        tag_ids=(0, 1, 2, 3), offset_x=0, offset_y=0),
+            ScreenRegion(name="Center", width=width, height=height,
+                        tag_ids=(4, 5, 6, 7), offset_x=width, offset_y=0),
+            ScreenRegion(name="Right", width=width, height=height,
+                        tag_ids=(8, 9, 10, 11), offset_x=width * 2, offset_y=0),
         ])
 
 
@@ -151,7 +97,7 @@ class MultiScreenMapper:
     def __init__(self, config: MultiScreenConfig):
         self.config = config
         self.detector = Detector(
-            families="tag36h11",
+            families="tag16h5",
             nthreads=4,
             quad_decimate=1.0,
             quad_sigma=0.0,
@@ -316,7 +262,6 @@ class MultiScreenMapper:
 def run_demo(camera_index: int = 0, layout: str = "dual_horizontal"):
     """Run interactive multi-screen demo."""
     
-    # Select layout
     layouts = {
         "dual_horizontal": MultiScreenConfig.dual_horizontal,
         "dual_vertical": MultiScreenConfig.dual_vertical,
@@ -407,7 +352,7 @@ def run_demo(camera_index: int = 0, layout: str = "dual_horizontal"):
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Multi-screen AprilTag registration")
+    parser = argparse.ArgumentParser(description="Multi-screen AprilTag registration (tag16h5)")
     parser.add_argument(
         "--layout",
         choices=["dual_horizontal", "dual_vertical", "triple_horizontal"],

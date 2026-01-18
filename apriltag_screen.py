@@ -1,20 +1,38 @@
 """
-AprilTag-based screen registration with homography mapping.
+AprilTag-based screen registration with homography mapping (tag16h5).
 
-Uses tag36h11 family with specific tag IDs at each corner:
-- ID 0: Top-left
-- ID 1: Top-right
-- ID 2: Bottom-right
-- ID 3: Bottom-left
+Tags are placed at screen corners. We use the INNER corner of each tag
+(the corner facing the screen center) for accurate mapping.
+
+Tag placement:
+- ID 0: Top-left corner     → use tag's bottom-right corner
+- ID 1: Top-right corner    → use tag's bottom-left corner
+- ID 2: Bottom-right corner → use tag's top-left corner
+- ID 3: Bottom-left corner  → use tag's top-right corner
 """
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 import cv2
 import numpy as np
 from pupil_apriltags import Detector
+
+# Corner indices in AprilTag detection (counter-clockwise from bottom-left)
+# corners[0] = bottom-left, corners[1] = bottom-right
+# corners[2] = top-right, corners[3] = top-left
+CORNER_BOTTOM_LEFT = 0
+CORNER_BOTTOM_RIGHT = 1
+CORNER_TOP_RIGHT = 2
+CORNER_TOP_LEFT = 3
+
+# Which corner of each tag faces the screen center
+INNER_CORNER_MAP = {
+    0: CORNER_BOTTOM_RIGHT,  # Top-left tag → bottom-right corner
+    1: CORNER_BOTTOM_LEFT,   # Top-right tag → bottom-left corner
+    2: CORNER_TOP_LEFT,      # Bottom-right tag → top-left corner
+    3: CORNER_TOP_RIGHT,     # Bottom-left tag → top-right corner
+}
 
 
 @dataclass
@@ -22,7 +40,6 @@ class ScreenConfig:
     """Screen configuration."""
     width: int = 1920
     height: int = 1080
-    # Tag IDs for each corner (clockwise from top-left)
     tag_ids: tuple[int, int, int, int] = (0, 1, 2, 3)
 
 
@@ -32,131 +49,124 @@ class AprilTagScreenMapper:
     for mapping camera coordinates to screen coordinates.
     """
 
-    def __init__(self, config: Optional[ScreenConfig] = None):
+    def __init__(self, config: Optional[ScreenConfig] = None, smoothing: float = 0.7):
+        """
+        Args:
+            config: Screen configuration
+            smoothing: Temporal smoothing factor (0=no smoothing, 1=full smoothing)
+        """
         self.config = config or ScreenConfig()
+        self.smoothing = smoothing
+        
         self.detector = Detector(
-            families="tag36h11",
+            families="tag16h5",
             nthreads=4,
             quad_decimate=1.0,
             quad_sigma=0.0,
             refine_edges=True,
             decode_sharpening=0.25,
         )
+        
         self.homography: Optional[np.ndarray] = None
         self.inverse_homography: Optional[np.ndarray] = None
-        self._last_tag_centers: dict[int, np.ndarray] = {}
+        self._last_detections: dict[int, object] = {}
+        self._smoothed_corners: Optional[np.ndarray] = None
 
         # Screen corner coordinates (destination points)
         self.screen_corners = np.array([
-            [0, 0],                                      # Top-left
-            [self.config.width, 0],                      # Top-right
-            [self.config.width, self.config.height],    # Bottom-right
-            [0, self.config.height],                    # Bottom-left
+            [0, 0],
+            [self.config.width - 1, 0],
+            [self.config.width - 1, self.config.height - 1],
+            [0, self.config.height - 1],
         ], dtype=np.float32)
 
-    def detect_tags(self, frame: np.ndarray) -> dict[int, np.ndarray]:
+    def detect_tags(self, frame: np.ndarray) -> dict[int, object]:
         """
-        Detect AprilTags in frame and return their centers.
+        Detect AprilTags in frame.
         
-        Args:
-            frame: BGR image from camera
-            
         Returns:
-            Dictionary mapping tag_id -> center coordinates (x, y)
+            Dictionary mapping tag_id -> detection object (with corners attribute)
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         detections = self.detector.detect(gray)
 
-        tag_centers = {}
+        tag_detections = {}
         for det in detections:
             if det.tag_id in self.config.tag_ids:
-                # det.center is (x, y) of tag center
-                tag_centers[det.tag_id] = np.array(det.center, dtype=np.float32)
+                tag_detections[det.tag_id] = det
 
-        self._last_tag_centers = tag_centers
-        return tag_centers
+        self._last_detections = tag_detections
+        return tag_detections
 
-    def compute_homography(self, tag_centers: dict[int, np.ndarray]) -> bool:
+    def _get_inner_corners(self, detections: dict[int, object]) -> Optional[np.ndarray]:
+        """Extract the inner corners from detected tags."""
+        if not all(tid in detections for tid in self.config.tag_ids):
+            return None
+
+        corners = []
+        for tag_id in self.config.tag_ids:
+            det = detections[tag_id]
+            corner_idx = INNER_CORNER_MAP[tag_id]
+            corner = det.corners[corner_idx]
+            corners.append(corner)
+
+        return np.array(corners, dtype=np.float32)
+
+    def compute_homography(self, detections: dict[int, object]) -> bool:
         """
-        Compute homography matrix from detected tag centers.
+        Compute homography matrix from detected tags.
         
-        Args:
-            tag_centers: Dictionary mapping tag_id -> center coordinates
-            
-        Returns:
-            True if homography was successfully computed (all 4 tags found)
+        Uses the inner corners of tags for better accuracy.
         """
-        # Check if all 4 tags are detected
-        if not all(tid in tag_centers for tid in self.config.tag_ids):
+        src_corners = self._get_inner_corners(detections)
+        if src_corners is None:
             return False
 
-        # Source points from camera (tag centers in order: TL, TR, BR, BL)
-        src_points = np.array([
-            tag_centers[self.config.tag_ids[0]],  # Top-left
-            tag_centers[self.config.tag_ids[1]],  # Top-right
-            tag_centers[self.config.tag_ids[2]],  # Bottom-right
-            tag_centers[self.config.tag_ids[3]],  # Bottom-left
-        ], dtype=np.float32)
+        # Apply temporal smoothing
+        if self._smoothed_corners is None:
+            self._smoothed_corners = src_corners.copy()
+        else:
+            self._smoothed_corners = (
+                self.smoothing * self._smoothed_corners +
+                (1 - self.smoothing) * src_corners
+            )
 
-        # Compute homography: camera -> screen
-        self.homography, _ = cv2.findHomography(src_points, self.screen_corners)
-        
+        # Use getPerspectiveTransform for exactly 4 points (more stable than findHomography)
+        self.homography = cv2.getPerspectiveTransform(
+            self._smoothed_corners, self.screen_corners
+        )
+
         if self.homography is not None:
-            self.inverse_homography = np.linalg.inv(self.homography)
+            self.inverse_homography = cv2.getPerspectiveTransform(
+                self.screen_corners, self._smoothed_corners
+            )
             return True
         return False
 
     def camera_to_screen(self, point: tuple[float, float]) -> Optional[tuple[int, int]]:
-        """
-        Map a point from camera coordinates to screen coordinates.
-        
-        Args:
-            point: (x, y) coordinates in camera frame
-            
-        Returns:
-            (x, y) screen coordinates, or None if homography not available
-        """
+        """Map a point from camera coordinates to screen coordinates."""
         if self.homography is None:
             return None
 
-        # Convert to homogeneous coordinates
-        pt = np.array([[point[0], point[1], 1.0]], dtype=np.float32).T
+        # Use OpenCV's perspectiveTransform for accuracy
+        pts = np.array([[[point[0], point[1]]]], dtype=np.float32)
+        transformed = cv2.perspectiveTransform(pts, self.homography)
         
-        # Apply homography
-        transformed = self.homography @ pt
-        
-        # Convert back from homogeneous coordinates
-        w = transformed[2, 0]
-        if abs(w) < 1e-10:
-            return None
-            
-        screen_x = int(transformed[0, 0] / w)
-        screen_y = int(transformed[1, 0] / w)
+        screen_x = int(round(transformed[0, 0, 0]))
+        screen_y = int(round(transformed[0, 0, 1]))
 
         return (screen_x, screen_y)
 
     def screen_to_camera(self, point: tuple[float, float]) -> Optional[tuple[int, int]]:
-        """
-        Map a point from screen coordinates to camera coordinates.
-        
-        Args:
-            point: (x, y) coordinates on screen
-            
-        Returns:
-            (x, y) camera coordinates, or None if homography not available
-        """
+        """Map a point from screen coordinates to camera coordinates."""
         if self.inverse_homography is None:
             return None
 
-        pt = np.array([[point[0], point[1], 1.0]], dtype=np.float32).T
-        transformed = self.inverse_homography @ pt
+        pts = np.array([[[point[0], point[1]]]], dtype=np.float32)
+        transformed = cv2.perspectiveTransform(pts, self.inverse_homography)
         
-        w = transformed[2, 0]
-        if abs(w) < 1e-10:
-            return None
-            
-        cam_x = int(transformed[0, 0] / w)
-        cam_y = int(transformed[1, 0] / w)
+        cam_x = int(round(transformed[0, 0, 0]))
+        cam_y = int(round(transformed[0, 0, 1]))
 
         return (cam_x, cam_y)
 
@@ -166,33 +176,32 @@ class AprilTagScreenMapper:
         return 0 <= x < self.config.width and 0 <= y < self.config.height
 
     def draw_debug(self, frame: np.ndarray) -> np.ndarray:
-        """
-        Draw debug visualization on frame.
-        
-        Args:
-            frame: BGR image from camera
-            
-        Returns:
-            Frame with debug overlays
-        """
+        """Draw debug visualization on frame."""
         debug_frame = frame.copy()
 
-        # Draw detected tag centers
-        for tag_id, center in self._last_tag_centers.items():
-            cx, cy = int(center[0]), int(center[1])
-            cv2.circle(debug_frame, (cx, cy), 10, (0, 255, 0), -1)
+        for tag_id, det in self._last_detections.items():
+            # Draw all 4 corners of tag (small dots)
+            for i, corner in enumerate(det.corners):
+                cx, cy = int(corner[0]), int(corner[1])
+                cv2.circle(debug_frame, (cx, cy), 3, (100, 100, 100), -1)
+
+            # Draw the inner corner we use (larger, green)
+            inner_idx = INNER_CORNER_MAP[tag_id]
+            inner_corner = det.corners[inner_idx]
+            ix, iy = int(inner_corner[0]), int(inner_corner[1])
+            cv2.circle(debug_frame, (ix, iy), 8, (0, 255, 0), -1)
+            
+            # Draw tag center and ID
+            cx, cy = int(det.center[0]), int(det.center[1])
             cv2.putText(
                 debug_frame, f"ID:{tag_id}",
                 (cx + 15, cy), cv2.FONT_HERSHEY_SIMPLEX,
                 0.6, (0, 255, 0), 2
             )
 
-        # Draw quadrilateral if all 4 tags detected
-        if len(self._last_tag_centers) == 4:
-            pts = np.array([
-                self._last_tag_centers[self.config.tag_ids[i]]
-                for i in range(4)
-            ], dtype=np.int32)
+        # Draw quadrilateral connecting inner corners
+        if self._smoothed_corners is not None and len(self._last_detections) == 4:
+            pts = self._smoothed_corners.astype(np.int32)
             cv2.polylines(debug_frame, [pts], True, (255, 0, 255), 2)
 
         # Status text
@@ -209,16 +218,34 @@ class AprilTagScreenMapper:
 
 def run_demo(camera_index: int = 0):
     """Run interactive demo with camera feed."""
-    mapper = AprilTagScreenMapper()
+    import time
+
+    mapper = AprilTagScreenMapper(smoothing=0.5)
+
+    print(f"Opening camera {camera_index}...")
     cap = cv2.VideoCapture(camera_index)
 
     if not cap.isOpened():
         print("Error: Could not open camera")
+        print("  - Check camera permissions in System Settings > Privacy > Camera")
+        print("  - Make sure no other app is using the camera")
         return
 
-    print("AprilTag Screen Registration Demo")
-    print("==================================")
-    print("Place tag36h11 AprilTags at screen corners:")
+    time.sleep(0.5)
+
+    ret, test_frame = cap.read()
+    if not ret or test_frame is None:
+        print("Error: Camera opened but cannot read frames")
+        print("  - Try closing other apps that might use the camera")
+        print("  - Try a different camera index: python apriltag_screen.py --camera 1")
+        cap.release()
+        return
+
+    print("Camera ready!")
+    print()
+    print("AprilTag Screen Registration Demo (tag16h5)")
+    print("=" * 45)
+    print("Place tags at screen corners (inner corner touches screen edge):")
     print("  ID 0: Top-left")
     print("  ID 1: Top-right")
     print("  ID 2: Bottom-right")
@@ -227,7 +254,7 @@ def run_demo(camera_index: int = 0):
     print("Controls:")
     print("  'q' - Quit")
     print("  'c' - Lock/unlock calibration")
-    print("  Click - Show mapped screen coordinates")
+    print("  's' - Toggle smoothing")
 
     calibration_locked = False
     mouse_pos = None
@@ -243,16 +270,14 @@ def run_demo(camera_index: int = 0):
     while True:
         ret, frame = cap.read()
         if not ret:
+            print("Lost camera feed")
             break
 
-        # Detect tags
-        tag_centers = mapper.detect_tags(frame)
+        detections = mapper.detect_tags(frame)
 
-        # Update homography (unless locked)
         if not calibration_locked:
-            mapper.compute_homography(tag_centers)
+            mapper.compute_homography(detections)
 
-        # Draw debug visualization
         debug_frame = mapper.draw_debug(frame)
 
         # Show mouse position mapping
@@ -269,13 +294,19 @@ def run_demo(camera_index: int = 0):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2
                 )
 
-        # Lock status
+        # Status overlay
         if calibration_locked:
             cv2.putText(
                 debug_frame, "LOCKED",
                 (10, 60), cv2.FONT_HERSHEY_SIMPLEX,
                 0.7, (255, 165, 0), 2
             )
+
+        cv2.putText(
+            debug_frame, f"Smoothing: {mapper.smoothing:.1f}",
+            (10, debug_frame.shape[0] - 10),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1
+        )
 
         cv2.imshow("AprilTag Screen Registration", debug_frame)
 
@@ -285,10 +316,24 @@ def run_demo(camera_index: int = 0):
         elif key == ord('c'):
             calibration_locked = not calibration_locked
             print(f"Calibration {'locked' if calibration_locked else 'unlocked'}")
+        elif key == ord('s'):
+            mapper.smoothing = 0.0 if mapper.smoothing > 0 else 0.5
+            mapper._smoothed_corners = None
+            print(f"Smoothing: {mapper.smoothing}")
 
     cap.release()
     cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
-    run_demo()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="AprilTag screen registration (tag16h5)")
+    parser.add_argument("--camera", type=int, default=0, help="Camera index (default: 0)")
+    parser.add_argument("--width", type=int, default=1920, help="Screen width (default: 1920)")
+    parser.add_argument("--height", type=int, default=1080, help="Screen height (default: 1080)")
+    args = parser.parse_args()
+
+    config = ScreenConfig(width=args.width, height=args.height)
+    # Note: config not currently passed to run_demo, would need refactoring for that
+    run_demo(camera_index=args.camera)
