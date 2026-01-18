@@ -39,8 +39,8 @@ public partial class MainWindow : Window
     private GestureController? _gestureController;
     private GestureUdpReceiver? _gestureReceiver;
     
-    // AprilTag overlay
-    private AprilTagOverlay? _aprilTagOverlay;
+    // Multi-screen AprilTag manager
+    private MultiScreenAprilTagManager? _aprilTagManager;
     private bool _aprilTagsVisible;
 
     public MainWindow()
@@ -62,7 +62,7 @@ public partial class MainWindow : Window
             _gestureReceiver.Dispose();
         }
         
-        _aprilTagOverlay?.Close();
+        _aprilTagManager?.Dispose();
         _gestureController?.Dispose();
     }
     
@@ -95,9 +95,11 @@ public partial class MainWindow : Window
             _gestureController.ModeChanged += OnGestureModeChanged;
             _gestureController.TargetScreenChanged += OnTargetScreenChanged;
             
-            // Create and start receiver with screen filter
+            // Create and start receiver - accept gestures for ALL screens
+            // The screenIndex in gesture data determines which screen to control
             _gestureReceiver = new GestureUdpReceiver(GestureControlPort, _gestureController);
-            _gestureReceiver.ScreenIndexFilter = _gestureController.TargetScreenIndex; // Filter to only accept gestures for this screen
+            // ScreenIndexFilter = -1 means accept all screens (default)
+            // _gestureReceiver.ScreenIndexFilter = _gestureController.TargetScreenIndex; // Removed: don't filter by screen
             _gestureReceiver.GestureReceived += OnGestureReceived;
             _gestureReceiver.GestureFiltered += OnGestureFiltered;
             _gestureReceiver.ErrorOccurred += OnGestureError;
@@ -111,7 +113,7 @@ public partial class MainWindow : Window
             
             UpdateTargetScreenLabel();
             
-            Log($"Gesture listener started on port {GestureControlPort}, filtering for screen {_gestureController.TargetScreenIndex}");
+            Log($"Gesture listener started on port {GestureControlPort}, accepting ALL screens");
         }
         catch (Exception ex)
         {
@@ -240,34 +242,34 @@ public partial class MainWindow : Window
     {
         if (_aprilTagsVisible)
         {
-            // Hide AprilTags
-            _aprilTagOverlay?.Hide();
+            // Hide AprilTags on all screens
+            _aprilTagManager?.HideAll();
             _aprilTagsVisible = false;
             AprilTagButton.Content = "Show AprilTags";
             AprilTagStatusLabel.Text = "Off";
             AprilTagStatusLabel.Foreground = new SolidColorBrush(Colors.Gray);
-            Log("AprilTags hidden");
+            Log("AprilTags hidden on all screens");
         }
         else
         {
-            // Show AprilTags
-            int targetScreen = _gestureController?.TargetScreenIndex ?? 0;
-            
-            if (_aprilTagOverlay == null)
+            // Show AprilTags on all screens
+            if (_aprilTagManager == null)
             {
-                _aprilTagOverlay = new AprilTagOverlay(targetScreen);
-            }
-            else
-            {
-                _aprilTagOverlay.SetTargetScreen(targetScreen);
+                _aprilTagManager = new MultiScreenAprilTagManager
+                {
+                    TagSize = 120,
+                    CornerMargin = 30
+                };
             }
             
-            _aprilTagOverlay.Show();
+            _aprilTagManager.ShowAll();
             _aprilTagsVisible = true;
             AprilTagButton.Content = "Hide AprilTags";
-            AprilTagStatusLabel.Text = $"Screen {targetScreen + 1}";
+            
+            int screenCount = DpiAwareScreenManager.ScreenCount;
+            AprilTagStatusLabel.Text = $"All {screenCount} screens";
             AprilTagStatusLabel.Foreground = new SolidColorBrush(Colors.LimeGreen);
-            Log($"AprilTags shown on Screen {targetScreen + 1}");
+            Log($"AprilTags shown on {screenCount} screen(s)");
         }
     }
     
@@ -301,6 +303,35 @@ public partial class MainWindow : Window
             _gestureController.SetMode(GestureMode.Cursor);
             LaserTestButton.Content = "Test Laser Pointer";
             Log("Laser pointer mode disabled");
+        }
+    }
+    
+    private void OnConfigureScreens(object sender, RoutedEventArgs e)
+    {
+        // Ensure AprilTag manager exists
+        _aprilTagManager ??= new MultiScreenAprilTagManager
+        {
+            TagSize = 120,
+            CornerMargin = 30
+        };
+        
+        bool wasVisible = _aprilTagsVisible;
+        if (wasVisible)
+        {
+            _aprilTagManager.HideAll();
+        }
+        
+        if (ScreenConfigurationWindow.ShowDialog(_aprilTagManager, this))
+        {
+            Log("Screen configuration updated");
+            
+            // Update target screen label
+            UpdateTargetScreenLabel();
+        }
+        
+        if (wasVisible)
+        {
+            _aprilTagManager.ShowAll();
         }
     }
     

@@ -255,6 +255,52 @@ def demo_laser_mode(sock):
     
     print("Done!")
 
+def demo_multi_screen(sock):
+    """Demonstrate cursor movement on specific screens."""
+    print("Demo: Multi-screen cursor control")
+    print("This demo moves the cursor on different screens.")
+    print("Make sure the C# receiver's ScreenIndexFilter matches the screen_index sent.\n")
+    
+    try:
+        screen_num = int(input("Enter target screen number (0, 1, 2, ...): "))
+    except ValueError:
+        screen_num = 0
+    
+    print(f"Moving cursor on screen {screen_num} in a circle pattern...")
+    
+    for t in range(200):
+        angle = t * 0.1
+        x = 0.5 + 0.3 * math.cos(angle)
+        y = 0.5 + 0.3 * math.sin(angle)
+        send_gesture(sock, pointer_gesture(x, y, screen_index=screen_num))
+        time.sleep(0.02)
+    
+    print("Done!")
+
+def demo_all_screens_sequential(sock):
+    """Demonstrate cursor movement across multiple screens sequentially."""
+    print("Demo: Sequential multi-screen movement")
+    print("NOTE: This will send gestures with different screen indices.")
+    print("The C# receiver will only process gestures matching its ScreenIndexFilter.\n")
+    
+    try:
+        num_screens = int(input("How many screens to cycle through? (default 2): ") or "2")
+    except ValueError:
+        num_screens = 2
+    
+    print(f"Cycling through {num_screens} screens...")
+    
+    for screen in range(num_screens):
+        print(f"  Screen {screen}: Drawing circle...")
+        for t in range(100):
+            angle = t * 0.1
+            x = 0.5 + 0.25 * math.cos(angle)
+            y = 0.5 + 0.25 * math.sin(angle)
+            send_gesture(sock, pointer_gesture(x, y, screen_index=screen))
+            time.sleep(0.02)
+    
+    print("Done!")
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -275,6 +321,8 @@ def main():
         print("4. Drag operation (pinch)")
         print("5. Vertical scrolling (thumbs up)")
         print("6. Laser pointer mode toggle (clap)")
+        print("7. Multi-screen: Target specific screen")
+        print("8. Multi-screen: Sequential screen cycling")
         print("0. Exit")
         
         choice = input("\nEnter choice: ").strip()
@@ -291,6 +339,10 @@ def main():
             demo_scroll(sock)
         elif choice == "6":
             demo_laser_mode(sock)
+        elif choice == "7":
+            demo_multi_screen(sock)
+        elif choice == "8":
+            demo_all_screens_sequential(sock)
         elif choice == "0":
             break
         else:

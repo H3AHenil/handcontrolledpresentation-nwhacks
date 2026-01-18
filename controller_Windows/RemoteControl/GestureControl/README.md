@@ -284,20 +284,25 @@ Features:
 
 ```
 GestureControl/
-├── IGestureInputHandler.cs      # Core interface
-├── GestureController.cs         # Main implementation
-├── Win32InputSimulator.cs       # P/Invoke APIs
-├── LaserPointerOverlay.cs       # WPF overlay window
-├── ScreenManager.cs             # Multi-monitor support
-├── ScreenSelectorWindow.xaml    # Screen selection UI
-├── ScreenSelectorWindow.xaml.cs # Screen selection code-behind
-├── GestureDataAdapter.cs        # CV data adapter
-├── GestureUdpReceiver.cs        # UDP listener
-├── GestureControlDemoWindow.xaml      # Demo UI
-├── GestureControlDemoWindow.xaml.cs   # Demo code-behind
-├── quick_test.py                # Python test script
-├── gesture_sender_example.py    # Python example for CV integration
-└── README.md                    # This file
+├── IGestureInputHandler.cs           # Core interface
+├── GestureController.cs              # Main implementation
+├── Win32InputSimulator.cs            # P/Invoke APIs
+├── LaserPointerOverlay.cs            # WPF overlay window
+├── ScreenManager.cs                  # Multi-monitor support
+├── DpiAwareScreenManager.cs          # DPI-aware screen utilities
+├── ScreenSelectorWindow.xaml         # Screen selection UI
+├── ScreenSelectorWindow.xaml.cs      # Screen selection code-behind
+├── ScreenConfigurationWindow.xaml    # Multi-screen AprilTag configuration UI
+├── ScreenConfigurationWindow.xaml.cs # Configuration code-behind
+├── AprilTagOverlay.cs                # Single-screen AprilTag overlay
+├── MultiScreenAprilTagManager.cs     # Multi-screen AprilTag manager (16h5 format)
+├── GestureDataAdapter.cs             # CV data adapter
+├── GestureUdpReceiver.cs             # UDP listener
+├── GestureControlDemoWindow.xaml     # Demo UI
+├── GestureControlDemoWindow.xaml.cs  # Demo code-behind
+├── quick_test.py                     # Python test script
+├── gesture_sender_example.py         # Python example for CV integration
+└── README.md                         # This file
 ```
 
 ## Requirements
@@ -416,5 +421,119 @@ controller.TargetScreenIndex = 1;
 // Then activate laser mode - it will appear on screen 1
 controller.ToggleLaserMode();
 ```
+
+## AprilTag Support for Camera Calibration
+
+The system includes AprilTag 16h5 format markers for camera-based screen detection.
+
+### AprilTag Concept
+
+AprilTags are visual fiducial markers used for:
+- Camera calibration and screen identification
+- Determining which screen the camera is looking at
+- Accurate coordinate mapping between camera and screen space
+
+### AprilTag ID Mapping
+
+Each screen displays 4 AprilTags (one per corner):
+- **Screen 0**: Tags 0, 1, 2, 3
+- **Screen 1**: Tags 4, 5, 6, 7
+- **Screen 2**: Tags 8, 9, 10, 11
+- And so on...
+
+Corner positions:
+- **Tag 0, 4, 8...** = Top-Left (TL)
+- **Tag 1, 5, 9...** = Top-Right (TR)
+- **Tag 2, 6, 10...** = Bottom-Right (BR)
+- **Tag 3, 7, 11...** = Bottom-Left (BL)
+
+### Using the Multi-Screen AprilTag Manager
+
+```csharp
+using TestOnRemoteControl.GestureControl;
+
+// Create the manager
+var aprilTagManager = new MultiScreenAprilTagManager
+{
+    TagSize = 120,       // Size in pixels
+    CornerMargin = 30    // Distance from corners
+};
+
+// Show AprilTags on all screens
+aprilTagManager.ShowAll();
+
+// Or show on a specific screen
+aprilTagManager.ShowOnScreen(0);
+
+// Hide all
+aprilTagManager.HideAll();
+
+// Configure custom screen mapping
+// (e.g., if your camera sees screens in a different order)
+aprilTagManager.SetScreenMapping(physicalScreenIndex: 0, logicalScreenNumber: 1);
+aprilTagManager.SetScreenMapping(physicalScreenIndex: 1, logicalScreenNumber: 0);
+
+// Cleanup
+aprilTagManager.Dispose();
+```
+
+### Screen Configuration Window
+
+Use the **"Configure Screens"** button to:
+1. View all connected displays
+2. Assign logical screen numbers to physical displays
+3. Preview AprilTags on each screen
+4. Customize the tag ID mapping
+
+### Detecting AprilTags in Python
+
+Use the `apriltag` library in your CV module:
+
+```python
+import cv2
+import apriltag
+
+# Create detector for 16h5 family
+options = apriltag.DetectorOptions(families="tag16h5")
+detector = apriltag.Detector(options)
+
+# Detect tags in frame
+gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+tags = detector.detect(gray)
+
+for tag in tags:
+    tag_id = tag.tag_id
+    corners = tag.corners  # 4 corner points
+    center = tag.center    # Center point
+    
+    # Determine which screen and corner
+    screen_number = tag_id // 4
+    corner_index = tag_id % 4  # 0=TL, 1=TR, 2=BR, 3=BL
+    
+    print(f"Tag {tag_id}: Screen {screen_number}, Corner {corner_index}")
+```
+
+### Multi-Device / Multi-Controller Setup
+
+When controlling multiple devices:
+
+1. **Device ID Filtering**: Use `deviceId` in your JSON packets:
+   ```json
+   {
+       "type": "pointer",
+       "deviceId": "device_1",
+       "screenIndex": 0,
+       "x": 0.5,
+       "y": 0.5
+   }
+   ```
+
+2. **Configure the receiver**:
+   ```csharp
+   receiver.DeviceIdFilter = "device_1";  // Only accept from this device
+   receiver.ScreenIndexFilter = 0;         // Only accept for screen 0
+   ```
+
+3. **Ignore non-matching gestures**: The receiver automatically filters out gestures that don't match the configured filters.
 
 

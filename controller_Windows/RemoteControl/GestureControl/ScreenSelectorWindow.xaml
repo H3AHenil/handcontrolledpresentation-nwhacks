@@ -27,7 +27,7 @@
                             <Border x:Name="ScreenBorder" 
                                     BorderBrush="#DDDDDD" BorderThickness="1" 
                                     CornerRadius="4" Margin="5" Padding="10"
-                                    Background="{Binding Background, Mode=OneWay}"
+                                    Background="{Binding Background}"
                                     MouseLeftButtonDown="OnScreenItemClick"
                                     Cursor="Hand">
                                 <Grid>
@@ -40,7 +40,7 @@
                                     <!-- Screen Icon -->
                                     <Border Grid.Column="0" Width="80" Height="50" 
                                             Background="#333333" CornerRadius="3" Margin="0,0,15,0">
-                                        <TextBlock Text="{Binding DisplayIndex, Mode=OneWay}" 
+                                        <TextBlock Text="{Binding DisplayIndex}" 
                                                    Foreground="White" FontSize="24" FontWeight="Bold"
                                                    HorizontalAlignment="Center" VerticalAlignment="Center"/>
                                     </Border>
@@ -49,25 +49,25 @@
                                     <StackPanel Grid.Column="1" VerticalAlignment="Center">
                                         <TextBlock FontSize="14" FontWeight="SemiBold">
                                             <Run Text="Screen "/>
-                                            <Run Text="{Binding DisplayIndex, Mode=OneWay}"/>
-                                            <Run Text="{Binding PrimaryLabel, Mode=OneWay}" Foreground="#2196F3"/>
+                                            <Run Text="{Binding DisplayIndex}"/>
+                                            <Run Text="{Binding PrimaryLabel}" Foreground="#2196F3"/>
                                         </TextBlock>
                                         <TextBlock Foreground="Gray" Margin="0,3,0,0">
-                                            <Run Text="{Binding Resolution, Mode=OneWay}"/>
+                                            <Run Text="{Binding Resolution}"/>
                                             <Run Text=" at position "/>
-                                            <Run Text="{Binding Position, Mode=OneWay}"/>
+                                            <Run Text="{Binding Position}"/>
                                         </TextBlock>
-                                        <TextBlock Text="{Binding DeviceName, Mode=OneWay}" Foreground="#888888" FontSize="11"/>
+                                        <TextBlock Text="{Binding DeviceName}" Foreground="#888888" FontSize="11"/>
                                     </StackPanel>
                                     
                                     <!-- Selection Indicator -->
                                     <Border Grid.Column="2" x:Name="SelectedIndicator"
                                             Width="24" Height="24" CornerRadius="12"
-                                            Background="{Binding SelectionColor, Mode=OneWay}"
+                                            Background="{Binding SelectionColor}"
                                             VerticalAlignment="Center">
                                         <TextBlock Text="✓" Foreground="White" 
                                                    HorizontalAlignment="Center" VerticalAlignment="Center"
-                                                   FontWeight="Bold" Visibility="{Binding CheckVisibility, Mode=OneWay}"/>
+                                                   FontWeight="Bold" Visibility="{Binding CheckVisibility}"/>
                                     </Border>
                                 </Grid>
                             </Border>
