@@ -10,6 +10,7 @@ import cv2
 import time
 
 from apriltage import CAMERA_WIDTH, CAMERA_HEIGHT
+from server.receiver import LowLatencyReceiver, PORT
 from src.hand_gestures import (
     VIEW_MODE, MAX_NUM_HANDS,
     extract_features,
@@ -210,6 +211,7 @@ def run_integrated_tracker(camera_index: int = 0) -> None:
 
     # Screen mapping
     mapper = MultiScreenMapper()
+    receiver = LowLatencyReceiver(PORT, wide_angle_crop=False)
 
     with mp_hands.Hands(
         static_image_mode=False,
@@ -219,10 +221,11 @@ def run_integrated_tracker(camera_index: int = 0) -> None:
         min_tracking_confidence=0.5,
     ) as hands, TrackerDisplay() as display:
 
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                continue
+        while True:
+
+            frame, latency = receiver.get_latest()
+
+            frame = cv2.flip(frame,-1)
 
             if PROCESS_FLIP:
                 frame = cv2.flip(frame, 1)
