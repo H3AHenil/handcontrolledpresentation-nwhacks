@@ -31,7 +31,7 @@ THUMBS_UP_MIN_VY = -0.88
 THUMBS_UP_MAX_VX = 0.28
 THUMBS_UP_MAX_VZ = 0.35
 THUMBS_ENTER_FRAMES = 8
-THUMBS_EXIT_FRAMES = 2
+THUMBS_EXIT_FRAMES = 6
 THUMBS_LOG_INTERVAL_S = 0.25
 THUMBS_REQUIRE_CURLED_FINGERS = 3
 THUMBS_BLOCK_IF_POINTER = True
@@ -424,11 +424,12 @@ def main():
                     if st["pinch_active"]:
                         pointer = False
 
-                    mp_drawing.draw_landmarks(
-                        frame, hand_landmarks, mp_hands.HAND_CONNECTIONS,
-                        mp_drawing_styles.get_default_hand_landmarks_style(),
-                        mp_drawing_styles.get_default_hand_connections_style()
-                    )
+                    mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+                    # Optional: draw small green circles at each joint
+                    for lm in hand_landmarks.landmark:
+                        cx, cy = int(lm.x * w), int(lm.y * h)
+                        cv2.circle(frame, (cx, cy), 5, (0, 255, 0), -1)
 
                     if pointer or st["pinch_active"]:
                         cv2.circle(frame, feats["index_tip_px"], 10, (0, 255, 0), -1)
