@@ -231,6 +231,43 @@ def is_calibrated(state: MapperState) -> bool:
     return state["homography"] is not None
 
 
+def get_screen_corners(state: MapperState) -> dict[str, tuple[int, int]] | None:
+    """
+    Get camera pixel coordinates of screen corners.
+
+    Returns:
+        Dict with keys 'tl', 'tr', 'br', 'bl' mapping to (x, y) pixel coordinates,
+        or None if not all 4 tags are detected.
+    """
+    if state["num_tags_detected"] != 4 or state["camera_corners"] is None:
+        return None
+
+    corners = state["camera_corners"]
+    return {
+        "tl": (int(corners[0][0]), int(corners[0][1])),
+        "tr": (int(corners[1][0]), int(corners[1][1])),
+        "br": (int(corners[2][0]), int(corners[2][1])),
+        "bl": (int(corners[3][0]), int(corners[3][1])),
+    }
+
+
+def get_all_screen_corners(
+    states: dict[int, MapperState]
+) -> dict[int, dict[str, tuple[int, int]]]:
+    """
+    Get camera pixel coordinates for all calibrated screens.
+
+    Returns:
+        Dict mapping screen_index -> corner dict {'tl', 'tr', 'br', 'bl': (x, y)}
+        Only includes screens with all 4 tags detected.
+    """
+    return {
+        screen_idx: corners
+        for screen_idx, state in states.items()
+        if (corners := get_screen_corners(state)) is not None
+    }
+
+
 # =============================================================================
 # CAMERA FUNCTIONS
 # =============================================================================
