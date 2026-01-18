@@ -65,8 +65,10 @@ class FrameBuffer(TypedDict):
 class LowLatencyReceiver:
     def __init__(self, port: int = PORT, wide_angle_crop: bool = False):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Allow reuse of address/port even if in TIME_WAIT state
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(('0.0.0.0', port))
-        # 4MB 接收缓冲区，防止系统层丢包
+        # 4MB receive buffer to prevent packet loss at system level
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
 
         # 共享数据: (图像帧, 延迟ms)

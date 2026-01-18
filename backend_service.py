@@ -29,6 +29,9 @@ class GestureState:
     stretch_initial_dist: float | None = None
     stretch_active: bool = False
     last_pointer_screen: int = -1
+    # Track last known position per hand for fallback
+    last_pos: dict[str, tuple[float, float]] = field(default_factory=lambda: {"Left": (0.5, 0.5), "Right": (0.5, 0.5), "Unknown": (0.5, 0.5)})
+    last_screen_idx: dict[str, int] = field(default_factory=lambda: {"Left": -1, "Right": -1, "Unknown": -1})
 
 
 class GestureBackendService:
@@ -61,7 +64,7 @@ class GestureBackendService:
                 broadcast=broadcast,
             )
 
-    def _send_pointer(self, screen_result: ScreenResult) -> None:
+    def _send_pointer(self, screen_result: ScreenResult, label: str = "Unknown") -> None:
         """Send pointer gesture for cursor movement."""
         if not self._controller:
             return
@@ -70,6 +73,9 @@ class GestureBackendService:
             y=screen_result.rel_y,
             screen_index=screen_result.screen_idx,
         )
+        # Track last known position for this hand
+        self._state.last_pos[label] = (screen_result.rel_x, screen_result.rel_y)
+        self._state.last_screen_idx[label] = screen_result.screen_idx
         self._state.last_pointer_screen = screen_result.screen_idx
 
     def _send_pinch(self, x: float, y: float, active: bool, screen_index: int = -1) -> None:
@@ -186,24 +192,31 @@ class GestureBackendService:
         """Process a single hand's gestures."""
         label = d.label
         
-        # Handle pointer mode - send cursor position
-        if d.pointer and screen_result:
-            self._send_pointer(screen_result)
+        # Handle pointer/pinch mode - send cursor position to keep laser visible
+        # Send pointer for both pointer mode AND pinch mode (so laser stays visible during pinch)
+        if (d.pointer or d.pinch) and screen_result:
+            self._send_pointer(screen_result, label)
+        
+        # Get position to use (current screen_result or last known position)
+        if screen_result:
+            pos_x, pos_y = screen_result.rel_x, screen_result.rel_y
+            screen_idx = screen_result.screen_idx
+            # Update last known position
+            self._state.last_pos[label] = (pos_x, pos_y)
+            self._state.last_screen_idx[label] = screen_idx
+        else:
+            # Use last known position as fallback
+            pos_x, pos_y = self._state.last_pos.get(label, (0.5, 0.5))
+            screen_idx = self._state.last_screen_idx.get(label, -1)
         
         # Handle pinch transitions
         prev_pinch = self._state.prev_pinch.get(label, False)
         if d.pinch and not prev_pinch:
-            # Pinch started - send mouse down
-            if screen_result:
-                self._send_pinch(screen_result.rel_x, screen_result.rel_y, active=True, screen_index=screen_result.screen_idx)
-            else:
-                self._send_pinch(0.5, 0.5, active=True)
+            # Pinch started - send mouse down at current/last known position
+            self._send_pinch(pos_x, pos_y, active=True, screen_index=screen_idx)
         elif not d.pinch and prev_pinch:
             # Pinch ended - send mouse up
-            if screen_result:
-                self._send_pinch(screen_result.rel_x, screen_result.rel_y, active=False, screen_index=screen_result.screen_idx)
-            else:
-                self._send_pinch(0.5, 0.5, active=False)
+            self._send_pinch(pos_x, pos_y, active=False, screen_index=screen_idx)
         self._state.prev_pinch[label] = d.pinch
         
         # Handle thumbrot (hand rotation for scrolling)
@@ -221,10 +234,12 @@ class GestureBackendService:
 
     def _handle_no_hands(self) -> None:
         """Handle case when no hands are detected."""
-        # Check if any pinch was active and release it
+        # Check if any pinch was active and release it at last known position
         for label in ["Left", "Right", "Unknown"]:
             if self._state.prev_pinch.get(label, False):
-                self._send_pinch(0.5, 0.5, active=False)
+                pos_x, pos_y = self._state.last_pos.get(label, (0.5, 0.5))
+                screen_idx = self._state.last_screen_idx.get(label, -1)
+                self._send_pinch(pos_x, pos_y, active=False, screen_index=screen_idx)
                 self._state.prev_pinch[label] = False
         
         # Reset thumbrot state

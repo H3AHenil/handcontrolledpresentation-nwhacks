@@ -214,10 +214,14 @@ def process_hands(
     )
 
 
-def get_pointer_finger(detected: list[DetectedHand]) -> tuple[int, int] | None:
-    """Get the index finger position from the first hand in pointer mode."""
+def get_active_finger(detected: list[DetectedHand]) -> tuple[int, int] | None:
+    """Get the index finger position from the first hand in pointer or pinch mode."""
+    # Priority: pointer mode first, then pinch mode
     for d in detected:
         if d.pointer:
+            return d.feats.index_tip_px
+    for d in detected:
+        if d.pinch:
             return d.feats.index_tip_px
     return None
 
@@ -303,8 +307,8 @@ def run_integrated_tracker(
                 frame, results, states, clap_detector, stretch_detector, now
             )
 
-            # Get pointer finger position for screen mapping
-            finger_pos = get_pointer_finger(gesture_data.detected)
+            # Get active finger position for screen mapping (pointer or pinch)
+            finger_pos = get_active_finger(gesture_data.detected)
             screen_result: ScreenResult | None = None
 
             if finger_pos:
